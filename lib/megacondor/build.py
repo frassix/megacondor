@@ -30,6 +30,9 @@ REQUEST_CPUS = 1
 REQUEST_MEMORY = "2 GB"
 REQUEST_DISK = "200 MB"
 #
+# Safety net: refuse to create more jobs than this in one run.
+MAX_JOBS = 10000
+#
 # Always store the complete Monte Carlo truth, and only triggered events.
 # The stop criterion is always a number of triggers (SpaceSim.Triggers).
 STORAGE = [
@@ -106,21 +109,45 @@ def prepare(card, site):
         else:
             groups = [(p, [p]) for p in card.particles]
 
+        logdir = os.path.join(rundir, "logs")
+        if card.log_dir:
+            logdir = os.path.join(os.path.abspath(card.log_dir), card.name)
+            if os.path.exists(logdir):
+                raise CardError("log directory already exists: %s" % logdir)
+
         if card.binning == "none":
+            if card.jobs * len(groups) > MAX_JOBS:
+                raise CardError("this would create %d jobs, more than the limit of %d"
+                                % (card.jobs * len(groups), MAX_JOBS))
             sources = dict((p, make_source(card, site, p, tmp, rundir)) for p in card.particles)
             runs = [Run(tag, [[sources[p] for p in group]] * card.jobs, card.triggers)
                     for tag, group in groups]
         else:
             # one energy bin per job
-            bins = dict((p, energy_bins(flat_range(card, site, p), card.jobs, card.binning))
-                        for p in card.particles)
-            runs = [Run(tag, [[_flat_source(card, p, *bins[p][i]) for p in group]
-                              for i in range(card.jobs)],
-                        card.triggers, [(p, bins[p]) for p in group])
-                    for tag, group in groups]
+            bins = {}
+            for p in card.particles:
+                erange = flat_range(card, site, p)
+                if card.bin_width:
+                    bins[p] = width_bins(erange, card.bin_width)
+                else:
+                    bins[p] = energy_bins(erange, card.jobs, card.binning)
+            check_job_count(card, groups, bins)
+            runs = []
+            for tag, group in groups:
+                if any(bins[p] != bins[group[0]] for p in group):
+                    raise CardError("combine = yes with bin_width needs the same energy range for "
+                                    "all particles (%s differ): use combine = no" % ", ".join(group))
+                runs.append(Run(tag, [[_flat_source(card, p, *b[i]) for p, b in
+                                       ((q, bins[q]) for q in group)]
+                                      for i in range(len(bins[group[0]]))],
+                                card.triggers, [(p, bins[p]) for p in group]))
 
+        if card.log_dir:
+            os.rmdir(os.path.join(tmp, "logs"))
+            os.makedirs(logdir)
+            os.symlink(logdir, os.path.join(tmp, "logs"))  # <run>/logs points to the log directory
         jobs = write_sources(card, site, runs, tmp, rundir)
-        write_submit(card, site, tmp, rundir, "jobs.submit", "jobs.list")
+        write_submit(card, site, tmp, rundir, logdir, "jobs.submit", "jobs.list")
         shutil.copy(WRAPPER, os.path.join(tmp, "run_cosima.sh"))
         os.chmod(os.path.join(tmp, "run_cosima.sh"), 0o755)
         shutil.copy(card.path, os.path.join(tmp, "card.ini"))
@@ -131,6 +158,8 @@ def prepare(card, site):
         os.rename(tmp, rundir)
     except Exception:
         shutil.rmtree(tmp, ignore_errors=True)
+        if card.log_dir and os.path.isdir(logdir) and not os.listdir(logdir):
+            os.rmdir(logdir)
         raise
     return rundir, summary
 
@@ -140,6 +169,16 @@ def flat_range(card, site, particle):
     the flux file has flux in the theta/phi window (cutoff)."""
     if card.mode == "flat":
         return card.emin, card.emax
+    support = _cutoff_support(card, site, particle)
+    lo = support[0] if card.emin is None else max(support[0], card.emin)
+    hi = support[1] if card.emax is None else min(support[1], card.emax)
+    if lo >= hi:
+        raise CardError("%s: emin/emax (%s-%s keV) do not overlap the flux file range %g-%g keV"
+                        % ((particle, card.emin, card.emax) + support))
+    return lo, hi
+
+
+def _cutoff_support(card, site, particle):
     table = FluxTable.read(site.flux_file(particle))
     try:
         if card.is_point:
@@ -162,6 +201,34 @@ def energy_bins(erange, n, binning):
         edges = [lo + (hi - lo) * i / float(n) for i in range(n + 1)]
     edges[0], edges[-1] = lo, hi
     return list(zip(edges[:-1], edges[1:]))
+
+
+def width_bins(erange, width):
+    """Linear bins of the given width, with edges on multiples of the width
+    (the first and last bin are shorter if the range does not start/end on one)."""
+    lo, hi = erange
+    tol = 1e-9 * width
+    edges = [lo]
+    k = int(math.floor(lo / width)) + 1
+    while k * width < hi - tol:
+        if k * width > lo + tol:
+            edges.append(k * width)
+        k += 1
+    edges.append(hi)
+    return list(zip(edges[:-1], edges[1:]))
+
+
+def check_job_count(card, groups, bins):
+    total = sum(len(bins[group[0]]) for _, group in groups)
+    if total > MAX_JOBS:
+        per = ", ".join("%s %d" % (p, len(bins[p])) for p in card.particles)
+        raise CardError("this would create %d jobs (bins: %s), more than the limit of %d.\n"
+                        "Use wider bins, narrow the range with emin/emax, or use binning = log."
+                        % (total, per, MAX_JOBS))
+    for _, group in groups:
+        n = len(bins[group[0]])
+        if card.triggers < n:
+            raise CardError("%d triggers for %d bins: less than one trigger per bin" % (card.triggers, n))
 
 
 def make_source(card, site, particle, tmp, rundir):
@@ -289,7 +356,7 @@ def write_sources(card, site, runs, tmp, rundir):
     return jobs
 
 
-def write_submit(card, site, tmp, rundir, submit_name, list_name):
+def write_submit(card, site, tmp, rundir, logdir, submit_name, list_name):
     text = """\
 # HTCondor submit file generated by megacondor - do not edit by hand.
 batch_name              = {name}
@@ -306,12 +373,12 @@ request_cpus            = {cpus}
 request_memory          = {memory}
 request_disk            = {disk}
 
-log                     = {rundir}/logs/condor.log
-output                  = {rundir}/logs/$(mc_job).out
-error                   = {rundir}/logs/$(mc_job).err
+log                     = {logdir}/condor.log
+output                  = {logdir}/$(mc_job).out
+error                   = {logdir}/$(mc_job).err
 
 queue mc_job, mc_source, mc_seed from {rundir}/{jobs_list}
-""".format(name=card.name, rundir=rundir, home=site.home, setup=site.megalib_setup,
+""".format(name=card.name, rundir=rundir, logdir=logdir, home=site.home, setup=site.megalib_setup,
            cpus=REQUEST_CPUS, memory=REQUEST_MEMORY, disk=REQUEST_DISK, jobs_list=list_name)
     with open(os.path.join(tmp, submit_name), "w") as f:
         f.write(text)
@@ -319,6 +386,8 @@ queue mc_job, mc_source, mc_seed from {rundir}/{jobs_list}
 
 def summarize(card, site, runs, jobs, rundir):
     out = ["Run '%s'  ->  %s" % (card.name, rundir),
+           "  logs      : %s" % os.path.join(os.path.abspath(card.log_dir), card.name)
+           if card.log_dir else None,
            "  mode      : %s" % card.mode,
            "  direction : %s" % card.direction_text(),
            "  geometry  : %s" % card.geometry]
@@ -347,7 +416,7 @@ def summarize(card, site, runs, jobs, rundir):
     out.append("  %d jobs in total, seeds %d..%d" % (len(jobs), jobs[0][2], jobs[-1][2]))
     for note in card.notes + _warnings(card, site):
         out.append("  note: %s" % note)
-    return "\n".join(out)
+    return "\n".join(line for line in out if line is not None)
 
 
 def _warnings(card, site):

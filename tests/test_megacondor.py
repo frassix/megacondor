@@ -173,7 +173,8 @@ class Sandbox(unittest.TestCase):
     def card(self, **kw):
         kw.setdefault("name", "t")
         kw.setdefault("triggers", "1000")
-        kw.setdefault("jobs", "4")
+        if "bin_width" not in kw:
+            kw.setdefault("jobs", "4")
         path = os.path.join(self.tmp, "%s.ini" % kw["name"])
         with open(path, "w") as f:
             f.write("[simulation]\n" + "".join("%s = %s\n" % kv for kv in kw.items()))
@@ -347,6 +348,47 @@ class TestBinning(Sandbox):
         spectra = self.spectra(rundir)
         self.assertEqual(len(spectra), 4)
         self.assertEqual(spectra[3], [["Linear", "175", "200"], ["Linear", "175", "200"]])
+
+    def test_bin_width_one_job_per_bin(self):
+        rundir = self.prepare(mode="cutoff", particles="proton, he4", triggers="1750000",
+                              bin_width="1000", emax="100000", theta="0 180", phi="0 360")
+        spectra = self.spectra(rundir)
+        self.assertEqual(len(spectra), 200)
+        self.assertEqual(spectra[0][0], ["Linear", "11.294", "1000"])   # he4 sorts first
+        self.assertEqual(spectra[1][0], ["Linear", "1000", "2000"])
+        self.assertEqual(spectra[99][0], ["Linear", "99000", "100000"])
+        self.assertIn("SpaceSim.Triggers         17500", read(self.sources(rundir)[0]))
+
+    def test_bin_width_rules(self):
+        with self.assertRaises(CardError):
+            Card(self.card(mode="flat", particles="p", emin="1", emax="9", bin_width="1",
+                           jobs="3"), self.site)
+        with self.assertRaises(CardError):
+            Card(self.card(mode="flat", particles="p", emin="1", emax="9", bin_width="1",
+                           binning="log"), self.site)
+        self.assertEqual(build.width_bins((0.5, 3.2), 1.0),
+                         [(0.5, 1.0), (1.0, 2.0), (2.0, 3.0), (3.0, 3.2)])
+
+    def test_job_limit(self):
+        with self.assertRaises(CardError) as ctx:
+            self.prepare(mode="cutoff", particles="proton", triggers="1000000", bin_width="1000",
+                         theta="0 180", phi="0 360")
+        self.assertIn("897160", str(ctx.exception))
+        self.assertEqual(os.listdir(self.out), [])
+
+    def test_cutoff_emin_emax_narrow_the_range(self):
+        rundir = self.prepare(mode="cutoff", particles="photon", emin="1", emax="500",
+                              theta="0 90", phi="0 360")
+        self.assertEqual(self.spectra(rundir)[0][0], ["Linear", "22.536", "500"])
+
+    def test_log_dir(self):
+        logs = os.path.join(self.tmp, "repologs")
+        rundir = self.prepare(name="lg", mode="flat", particles="photon", emin="1", emax="2",
+                              log_dir=logs)
+        self.assertEqual(os.path.realpath(os.path.join(rundir, "logs")),
+                         os.path.realpath(os.path.join(logs, "lg")))
+        self.assertIn("error                   = %s/$(mc_job).err" % os.path.join(logs, "lg"),
+                      read(os.path.join(rundir, "jobs.submit")))
 
     def test_binning_needs_flat_spectrum(self):
         with self.assertRaises(CardError):

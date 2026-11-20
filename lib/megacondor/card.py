@@ -76,6 +76,7 @@ class Site(object):
 CARD_KEYS = {
     "name", "mode", "particles", "triggers", "jobs", "emin", "emax", "theta", "phi",
     "first_interaction", "spectrum", "combine", "geometry", "seed", "output_root", "binning",
+    "bin_width", "log_dir",
 }
 
 
@@ -104,12 +105,23 @@ class Card(object):
         self.triggers = _positive_int(_required(get("triggers"), "triggers"), "triggers")
         self.jobs = _positive_int(get("jobs", "1"), "jobs")
         self.spectrum = _choice(get("spectrum", "flat"), SPECTRA, "spectrum")
-        self.binning = _choice(get("binning", "none"), BINNINGS, "binning")
+        self.bin_width = _number(get("bin_width"), "bin_width") if get("bin_width") else None
+        self.binning = _choice(get("binning", "linear" if self.bin_width else "none"),
+                               BINNINGS, "binning")
+        if self.bin_width is not None:
+            if self.bin_width <= 0:
+                raise CardError("bin_width must be > 0 keV")
+            if self.binning != "linear":
+                raise CardError("bin_width makes linear bins: remove 'binning = %s'" % self.binning)
+            if get("jobs"):
+                raise CardError("with bin_width there is one job per bin: remove 'jobs'")
         if self.binning != "none" and self.mode == "flux":
             raise CardError("binning works with flat spectra only (mode = flat or cutoff)")
         self.combine = _yesno(get("combine", "yes" if self.mode == "flux" else "no"), "combine")
         self.geometry = get("geometry", site.geometry)
         self.output_root = get("output_root", site.output_root)
+        log_dir = get("log_dir")   # relative paths are relative to the repository
+        self.log_dir = None if log_dir is None else os.path.join(REPO, os.path.expanduser(log_dir))
         self.seed = _positive_int(get("seed"), "seed") if get("seed") else None
 
         # energy
@@ -117,9 +129,6 @@ class Card(object):
         self.emax = _number(get("emax"), "emax") if get("emax") else None
         if self.mode == "flat" and (self.emin is None or self.emax is None):
             raise CardError("mode = flat needs emin and emax (keV)")
-        if self.mode == "cutoff" and (self.emin is not None or self.emax is not None):
-            self.notes.append("emin/emax are ignored in cutoff mode (the range comes from the flux files)")
-            self.emin = self.emax = None
         if self.emin is not None and self.emin <= 0:
             raise CardError("emin must be > 0 keV")
         if self.emin is not None and self.emax is not None and self.emax <= self.emin:
