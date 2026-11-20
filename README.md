@@ -17,7 +17,7 @@ Use `prepare` instead of `submit` to build everything and look at it first.
 |----------|--------------------------------------------|-----------------------------------------------|-----------------------------|
 | `flat`   | flat (or `logflat`)                        | `emin`..`emax`                                | response, effective area    |
 | `flux`   | realistic, from `fluxes/*.dat`             | `emin`..`emax` (empty = whole file)           | background, real rates      |
-| `cutoff` | flat (or `logflat`)                        | the range covered by `fluxes/*.dat`           | background, flat in energy  |
+| `cutoff` | flat (or `logflat`)                        | the range covered by `fluxes/*.dat` (`emin`/`emax` can narrow it) | background, flat in energy |
 
 `./megacondor info` shows the energy range and flux of every particle (`--theta 0 90` for a window).
 
@@ -37,6 +37,9 @@ One `[simulation]` section. Templates with comments are in `templates/`.
 | `phi`               | one value with a single theta, `min max` with a theta range            | `0` / `0 360`   |
 | `spectrum`          | `flat` or `logflat` (equal counts per decade), flat and cutoff modes   | `flat`          |
 | `binning`           | `none`, `linear` or `log`: one energy bin per job (flat and cutoff modes) | `none`       |
+| `bin_width`         | linear bins of this width in keV, one job per bin (replaces `jobs`)    |                 |
+| `output_root`       | where the run directory goes                                           | site.ini        |
+| `log_dir`           | put the condor logs in `<log_dir>/<name>/` (relative = inside the repo) | in the run dir |
 | `first_interaction` | photons only: `any`, `photo`, `compton`, `pair`                        | `any`           |
 | `combine`           | `yes`: all particles in one simulation, at their real relative rates   | flux: `yes`, else `no` |
 | `geometry`          | another `.geo.setup`                                                   | ComPair (site.ini) |
@@ -50,6 +53,8 @@ relative rates from the `.dat` files.
 and each job simulates one bin, with `triggers / jobs` triggers. Example: `emin = 100`, `emax = 1000`,
 `jobs = 50` gives 100-118, 118-136, ..., 982-1000 keV. `bins.txt` in the run directory maps each job
 (and so each output file) to its bin. With `binning = log` the bins have equal width in log(E).
+With `bin_width = 1000` you get 1 MeV bins with edges on whole MeV and one job per bin.
+A run may not have more than 10000 jobs (see `sims/hadrons.ini` for a worked example).
 
 **Direction.** theta is the angle the particle comes *from*, measured from the instrument axis (cosima far field).
 In flux mode the `.dat` table is cut to the theta/phi window, so the angular distribution stays realistic.
