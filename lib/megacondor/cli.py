@@ -116,6 +116,7 @@ def cmd_info(args, site):
 def cmd_prepare(args, site):
     card = Card(args.card, site)
     rundir, summary = build.prepare(card, site)
+    remember_run(card.name, rundir)
     print(summary)
     print("\nCheck it (e.g. %s/sources/), then submit with:" % rundir)
     print("  ./megacondor submit %s" % rundir)
@@ -125,6 +126,7 @@ def cmd_submit(args, site):
     if os.path.isfile(args.target) and args.target.endswith(".ini"):
         card = Card(args.target, site)
         rundir, summary = build.prepare(card, site)
+        remember_run(card.name, rundir)
         print(summary + "\n")
     else:
         rundir = resolve_run(args.target, site)
@@ -139,24 +141,49 @@ def cmd_status(args, site):
     rundir = resolve_run(args.run, site)
     jobs = read_jobs(rundir)
     done, failed, pending = classify(jobs)
+    progress = read_progress(jobs, done)
     queue = condor_queue(os.path.basename(rundir))
+    logdir = log_dir_of(rundir)
 
     print("Run %s  (%s)" % (os.path.basename(rundir), rundir))
+    print("  logs: %s" % logdir)
     if not os.path.exists(os.path.join(rundir, "submitted")):
         print("  not submitted yet:  ./megacondor submit %s" % rundir)
-    print("  done     %5d / %d" % (len(done), len(jobs)))
-    print("  failed   %5d" % len(failed))
+
+    # triggers, overall and per particle (or mix)
+    per_tag = {}
+    for job, (n, total) in progress.items():
+        tag = job.rsplit("_", 1)[0]
+        a, b = per_tag.get(tag, (0, 0))
+        per_tag[tag] = (a + n, b + total)
+    n_all, t_all = sum(v[0] for v in per_tag.values()), sum(v[1] for v in per_tag.values())
+    print("  triggers  %s" % _bar(n_all, t_all))
+    if len(per_tag) > 1:
+        for tag in sorted(per_tag):
+            print("     %-10s %s" % (tag, _bar(*per_tag[tag])))
+
+    running = [j for j in pending if os.path.exists(_mark(jobs, j) + ".progress")]
+    waiting = len(pending) - len(running)
+    print("  jobs      %d done, %d running, %d waiting, %d failed  (of %d)"
+          % (len(done), len(running), waiting, len(failed), len(jobs)))
     for job, reason in failed[:10]:
-        print("             %s: %s   (logs/%s.err)" % (job, reason, job))
+        print("     failed %s: %s   (%s.err)" % (job, reason, os.path.join(logdir, job)))
     if len(failed) > 10:
-        print("             ... and %d more" % (len(failed) - 10))
-    print("  pending  %5d   (queued, running, or killed by the cluster)" % len(pending))
+        print("     ... and %d more failed" % (len(failed) - 10))
     if queue is not None:
-        print("  in condor queue: %s" % (", ".join("%d %s" % (n, s) for s, n in sorted(queue.items()))
-                                         or "nothing"))
+        print("  condor    %s" % (", ".join("%d %s" % (n, st) for st, n in sorted(queue.items()))
+                                  or "nothing in the queue"))
         if not queue and pending:
             print("  -> nothing is queued but %d jobs never finished: ./megacondor resubmit %s"
                   % (len(pending), rundir))
+    if pending and not running and os.path.exists(os.path.join(rundir, "submitted")):
+        print("  (no progress files: runs prepared before the progress feature only count finished jobs)")
+
+
+def _bar(n, total, width=30):
+    frac = float(n) / total if total else 0.0
+    fill = int(round(frac * width))
+    return "[%s%s] %5.1f%%  %d / %d" % ("#" * fill, "." * (width - fill), 100 * frac, n, total)
 
 
 def cmd_resubmit(args, site):
@@ -182,9 +209,10 @@ def cmd_resubmit(args, site):
                 os.mkdir(stash)
             shutil.move(os.path.join(simdir, f), os.path.join(stash, f))
     for job in todo:
-        marker = os.path.join(rundir, "sources", job + ".failed")
-        if os.path.exists(marker):
-            os.remove(marker)
+        for ext in (".failed", ".progress"):
+            marker = os.path.join(rundir, "sources", job + ext)
+            if os.path.exists(marker):
+                os.remove(marker)
 
     n = 1
     while os.path.exists(os.path.join(rundir, "jobs.resubmit%d.list" % n)):
@@ -218,10 +246,32 @@ def resolve_run(target, site):
         path = target
     else:
         path = os.path.join(site.output_root, target)
+        if not os.path.isfile(os.path.join(path, "jobs.list")):
+            path = known_runs().get(target, path)
     path = os.path.abspath(path)
     if not os.path.isfile(os.path.join(path, "jobs.list")):
         raise CardError("no prepared run found at %s" % path)
     return path
+
+
+RUNS_FILE = os.path.join(REPO, "runs.txt")
+
+
+def remember_run(name, rundir):
+    """Note where a run lives, so 'status <name>' works whatever its output_root."""
+    with open(RUNS_FILE, "a") as f:
+        f.write("%s %s\n" % (name, rundir))
+
+
+def known_runs():
+    runs = {}
+    if os.path.isfile(RUNS_FILE):
+        with open(RUNS_FILE) as f:
+            for line in f:
+                tok = line.split(None, 1)
+                if len(tok) == 2:
+                    runs[tok[0]] = tok[1].strip()   # the latest entry wins
+    return runs
 
 
 def read_jobs(rundir):
@@ -241,6 +291,51 @@ def classify(jobs):
         else:
             pending.append(job)
     return done, failed, pending
+
+
+def _mark(jobs, job):
+    for j, source, _seed in jobs:
+        if j == job:
+            return source[:-len(".source")]
+    raise KeyError(job)
+
+
+def read_progress(jobs, done):
+    """{job: (triggers so far, triggers wanted)}, from the .progress files the
+    wrapper writes (done jobs count in full, jobs not started yet as 0)."""
+    done = set(done)
+    out = {}
+    for job, source, _seed in jobs:
+        mark = source[:-len(".source")]
+        total = _triggers_in(source)
+        n = total if job in done else 0
+        if job not in done and os.path.exists(mark + ".progress"):
+            try:
+                with open(mark + ".progress") as f:
+                    n = min(int(f.read().split()[0]), total)
+            except (ValueError, IndexError, OSError):
+                pass   # being rewritten right now
+        out[job] = (n, total)
+    return out
+
+
+def _triggers_in(source):
+    with open(source) as f:
+        for line in f:
+            tok = line.split()
+            if tok and tok[0].endswith(".Triggers"):
+                return int(tok[1])
+    return 0
+
+
+def log_dir_of(rundir):
+    """The log directory, as written in the run's submit file."""
+    with open(os.path.join(rundir, "jobs.submit")) as f:
+        for line in f:
+            tok = line.split("=", 1)
+            if tok[0].strip() == "log":
+                return os.path.dirname(tok[1].strip())
+    return os.path.join(rundir, "logs")
 
 
 CONDOR_STATES = {"1": "idle", "2": "running", "3": "removed", "4": "completed", "5": "held",
