@@ -1,0 +1,19 @@
+geometry           /data2/SIU/geo/amegox/Geometry/ComPair_23/ComPair23.geo.setup
+CheckForOverlaps 1000 0.01
+PhysicsListEM    LivermorePol
+PhysicsListHD     qgsp-bic-hp
+
+StoreCalibrate                 true
+StoreSimulationInfo            false
+StoreOnlyEventsWithEnergyLoss  true
+DiscretizeHits                 true
+StoreSimulationInfoIonization  false
+
+Run pho511_bkg
+pho511_bkg.FileName              /data2/SIU/sim/bkg/output/pho511compair2
+pho511_bkg.Time                   100
+
+pho511_bkg.Source One
+One.ParticleType        1
+One.Beam                FarFieldNormalizedEnergyBeamFluxFunction /data2/SIU/sim/bkg/fluxes/pho511_compair2_cosima.dat
+One.Spectrum            NormalizedEnergyBeamFluxFunction

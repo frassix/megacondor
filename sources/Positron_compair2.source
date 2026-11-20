@@ -1,0 +1,19 @@
+geometry           /data2/SIU/geo/amegox/Geometry/ComPair_23/ComPair23.geo.setup
+CheckForOverlaps 1000 0.01
+PhysicsListEM    LivermorePol
+PhysicsListHD     qgsp-bic-hp
+
+StoreCalibrate                 true
+StoreSimulationInfo            false
+StoreOnlyEventsWithEnergyLoss  true
+DiscretizeHits                 true
+StoreSimulationInfoIonization  false
+
+Run positron_bkg
+positron_bkg.FileName              /data2/SIU/sim/bkg/output/positroncompair2
+positron_bkg.Time                   100
+
+positron_bkg.Source One
+One.ParticleType        2
+One.Beam                FarFieldNormalizedEnergyBeamFluxFunction /data2/SIU/sim/bkg/fluxes/positron_compair2_cosima.dat
+One.Spectrum            NormalizedEnergyBeamFluxFunction

@@ -1,0 +1,30 @@
+# ============================================================
+# ComPair2 background simulation - Charged Hadrons
+# Sources: proton (4), He-4 (21)
+# Stop criterion: 5 000 000 triggered events
+# ============================================================
+
+geometry           /data2/SIU/geo/amegox/Geometry/ComPair_23/ComPair23.geo.setup
+CheckForOverlaps   1000 0.01
+PhysicsListEM      LivermorePol
+PhysicsListHD      qgsp-bic-hp
+
+StoreCalibrate                true
+StoreSimulationInfo           false
+StoreOnlyEventsWithEnergyLoss true
+DiscretizeHits                true
+StoreSimulationInfoIonization false
+
+Run charged_hadrons_bkg
+charged_hadrons_bkg.FileName   /data2/SIU/sim/bkg/output/charged_hadrons_compair2
+charged_hadrons_bkg.Triggers   100000
+
+charged_hadrons_bkg.Source Proton
+Proton.ParticleType     4
+Proton.Beam             FarFieldNormalizedEnergyBeamFluxFunction /data2/SIU/sim/bkg/fluxes/proton_compair2_cosima.dat
+Proton.Spectrum         NormalizedEnergyBeamFluxFunction
+
+charged_hadrons_bkg.Source He4
+He4.ParticleType        21
+He4.Beam                FarFieldNormalizedEnergyBeamFluxFunction /data2/SIU/sim/bkg/fluxes/he4_compair2_cosima.dat
+He4.Spectrum            NormalizedEnergyBeamFluxFunction

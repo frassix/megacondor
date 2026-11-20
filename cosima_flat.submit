@@ -1,0 +1,25 @@
+universe                = vanilla
+executable              = run_cosima_condor.sh
+
+should_transfer_files   = YES
+when_to_transfer_output = ON_EXIT
+
+log    = logs/cosima_$(Process).log
+output = logs/cosima_$(Process).out
+error  = logs/cosima_$(Process).err
+
+request_cpus   = 1
+request_memory = 2 GB
+request_disk   = 200 MB
+
+# Parametri globali
+EMIN      = 1000.0
+EMAX      = 50000.0
+NTRIGGERS = 1000
+OUTDIR    = /data2/SIU/sim/photoelectric
+GEOMETRY  = /data2/SIU/geo/amegox/Geometry/ComPair_23/ComPair23.geo.setup
+INTERACTION = PHOT
+
+arguments = $(Process) $(EMIN) $(EMAX) $(NTRIGGERS) $(OUTDIR) $(GEOMETRY) $(INTERACTION)
+
+queue 99

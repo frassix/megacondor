@@ -1,0 +1,27 @@
+universe                = vanilla
+executable              = run_cosima_energy_bins.sh
+
+should_transfer_files   = YES
+when_to_transfer_output = ON_EXIT
+
+log    = logs/cosima_bins_$(ClusterId)_$(Particle).log
+output = logs/cosima_bins_$(ClusterId)_$(Particle).out
+error  = logs/cosima_bins_$(ClusterId)_$(Particle).err
+
+request_cpus   = 1
+request_memory = 2 GB
+request_disk   = 200 MB
+
+# Energy in keV
+EMIN_START        = 100.0
+BIN_WIDTH         = 100.0
+
+# 100000 total / 50 bins = 2000 per bin
+NTRIGGERS_PER_BIN = 100000
+
+OUTDIR    = /data2/SIU/sim/bkg/
+GEOMETRY  = /data2/SIU/geo/amegox/Geometry/ComPair_23/ComPair23.geo.setup
+
+arguments = $(Particle) $(EMIN_START) $(BIN_WIDTH) $(NTRIGGERS_PER_BIN) $(OUTDIR) $(GEOMETRY)
+
+queue 10

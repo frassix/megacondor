@@ -1,0 +1,23 @@
+# ============================================================
+# ComPair2 background simulation - Photons only
+# Stop criterion: 100 000 triggered events
+# ============================================================
+
+geometry           /data2/SIU/geo/amegox/Geometry/ComPair_23/ComPair23.geo.setup
+CheckForOverlaps   1000 0.01
+PhysicsListEM      LivermorePol
+
+StoreCalibrate                true
+StoreSimulationInfo           false
+StoreOnlyEventsWithEnergyLoss true
+DiscretizeHits                true
+StoreSimulationInfoIonization false
+
+Run photon_bkg
+photon_bkg.FileName   /data2/SIU/sim/bkg/output/photons/photon_compair2
+photon_bkg.Triggers   100000
+
+photon_bkg.Source Photon
+Photon.ParticleType   1
+Photon.Beam           FarFieldNormalizedEnergyBeamFluxFunction /data2/SIU/sim/bkg/fluxes/photon_compair2_cosima.dat
+Photon.Spectrum       NormalizedEnergyBeamFluxFunction

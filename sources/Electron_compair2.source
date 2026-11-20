@@ -1,0 +1,19 @@
+geometry           /data2/SIU/geo/amegox/Geometry/ComPair_23/ComPair23.geo.setup
+CheckForOverlaps 1000 0.01
+PhysicsListEM    LivermorePol
+PhysicsListHD     qgsp-bic-hp
+
+StoreCalibrate                 true
+StoreSimulationInfo            false
+StoreOnlyEventsWithEnergyLoss  true
+DiscretizeHits                 true
+StoreSimulationInfoIonization  false
+
+Run electron_bkg
+electron_bkg.FileName              /data2/SIU/sim/bkg/output/electroncompair2
+electron_bkg.Time                   100
+
+electron_bkg.Source One
+One.ParticleType        3
+One.Beam                FarFieldNormalizedEnergyBeamFluxFunction /data2/SIU/sim/bkg/fluxes/electron_compair2_cosima.dat
+One.Spectrum            NormalizedEnergyBeamFluxFunction

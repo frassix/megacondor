@@ -1,0 +1,24 @@
+# ============================================================
+# ComPair2 background simulation - Neutrons only
+# Stop criterion: 100 000 triggered events
+# ============================================================
+
+geometry           /data2/SIU/geo/amegox/Geometry/ComPair_23/ComPair23.geo.setup
+CheckForOverlaps   1000 0.01
+PhysicsListEM      LivermorePol
+PhysicsListHD      qgsp-bic-hp
+
+StoreCalibrate                true
+StoreSimulationInfo           false
+StoreOnlyEventsWithEnergyLoss true
+DiscretizeHits                true
+StoreSimulationInfoIonization false
+
+Run neutron_bkg
+neutron_bkg.FileName   /data2/SIU/sim/bkg/output/neutrons/neutron_compair2
+neutron_bkg.Triggers   100000
+
+neutron_bkg.Source Neutron
+Neutron.ParticleType   6
+Neutron.Beam           FarFieldNormalizedEnergyBeamFluxFunction /data2/SIU/sim/bkg/fluxes/neutron_compair2_cosima.dat
+Neutron.Spectrum       NormalizedEnergyBeamFluxFunction

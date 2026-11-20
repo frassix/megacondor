@@ -1,0 +1,40 @@
+# ============================================================
+# ComPair2 background simulation - Charged Leptons
+# Sources: electron (3), positron (2), muplus (8), muminus (9)
+# Stop criterion: 5 000 000 triggered events
+# ============================================================
+
+geometry           /data2/SIU/geo/amegox/Geometry/ComPair_23/ComPair23.geo.setup
+CheckForOverlaps   1000 0.01
+PhysicsListEM      LivermorePol
+PhysicsListHD      qgsp-bic-hp
+
+StoreCalibrate                true
+StoreSimulationInfo           false
+StoreOnlyEventsWithEnergyLoss true
+DiscretizeHits                true
+StoreSimulationInfoIonization false
+
+Run charged_leptons_bkg
+charged_leptons_bkg.FileName   /data2/SIU/sim/bkg/output/leptons/charged_leptons_compair2
+charged_leptons_bkg.Triggers   100000
+
+charged_leptons_bkg.Source Electron
+Electron.ParticleType   3
+Electron.Beam           FarFieldNormalizedEnergyBeamFluxFunction /data2/SIU/sim/bkg/fluxes/electron_compair2_cosima.dat
+Electron.Spectrum       NormalizedEnergyBeamFluxFunction
+
+charged_leptons_bkg.Source Positron
+Positron.ParticleType   2
+Positron.Beam           FarFieldNormalizedEnergyBeamFluxFunction /data2/SIU/sim/bkg/fluxes/positron_compair2_cosima.dat
+Positron.Spectrum       NormalizedEnergyBeamFluxFunction
+
+charged_leptons_bkg.Source MuPlus
+MuPlus.ParticleType     8
+MuPlus.Beam             FarFieldNormalizedEnergyBeamFluxFunction /data2/SIU/sim/bkg/fluxes/muplus_compair2_cosima.dat
+MuPlus.Spectrum         NormalizedEnergyBeamFluxFunction
+
+charged_leptons_bkg.Source MuMinus
+MuMinus.ParticleType    9
+MuMinus.Beam            FarFieldNormalizedEnergyBeamFluxFunction /data2/SIU/sim/bkg/fluxes/muminus_compair2_cosima.dat
+MuMinus.Spectrum        NormalizedEnergyBeamFluxFunction
