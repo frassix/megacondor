@@ -1,0 +1,398 @@
+"""Tests: python3 -m unittest discover -s tests"""
+
+import io
+import os
+import random
+import shutil
+import stat
+import subprocess
+import sys
+import tempfile
+import unittest
+from contextlib import redirect_stdout, redirect_stderr
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+REPO = os.path.dirname(HERE)
+sys.path.insert(0, os.path.join(REPO, "lib"))
+
+from megacondor import build, cli  # noqa: E402
+from megacondor.card import Card, CardError, Site  # noqa: E402
+from megacondor.fluxtable import FluxTable, integrate_spectrum  # noqa: E402
+
+FLUX = os.path.join(REPO, "fluxes", "proton_compair2_cosima.dat")
+
+
+def read(path):
+    with open(path) as f:
+        return f.read()
+
+
+class TestFluxTable(unittest.TestCase):
+
+    @classmethod
+    def setUpClass(cls):
+        cls.table = FluxTable.read(FLUX)
+
+    def test_crop_is_the_same_function(self):
+        window = dict(phi_range=(30, 300), theta_range=(10, 75), energy_range=(1500, 3e5))
+        cropped = self.table.crop(**window)
+        rng = random.Random(1)
+        for _ in range(500):
+            p, t, e = rng.uniform(30, 300), rng.uniform(10, 75), rng.uniform(1500, 3e5)
+            a, b = self.table.evaluate(p, t, e), cropped.evaluate(p, t, e)
+            self.assertAlmostEqual(a, b, delta=1e-9 * a)
+
+    def test_full_crop_keeps_integral(self):
+        full = self.table.crop((0, 360), (0, 180), (self.table.energy[0], self.table.energy[-1]))
+        self.assertAlmostEqual(full.integrate(), self.table.integrate(), delta=1e-12)
+
+    def test_energy_split_is_additive(self):
+        lo = self.table.crop(energy_range=(100, 5000)).integrate()
+        hi = self.table.crop(energy_range=(5000, 1e6)).integrate()
+        both = self.table.crop(energy_range=(100, 1e6)).integrate()
+        self.assertAlmostEqual(lo + hi, both, delta=1e-9 * both)
+
+    def test_write_read_roundtrip(self):
+        cropped = self.table.crop(theta_range=(0, 60), energy_range=(1000, 1e5))
+        with tempfile.NamedTemporaryFile(suffix=".dat", delete=False) as f:
+            path = f.name
+        try:
+            cropped.write(path, "test")
+            again = FluxTable.read(path)
+            self.assertEqual(again.energy, cropped.energy)
+            self.assertAlmostEqual(again.integrate(), cropped.integrate(), delta=1e-6 * cropped.integrate())
+        finally:
+            os.remove(path)
+
+    def test_spectrum_slice(self):
+        e, f = self.table.spectrum_at(0, 0, (1000, 1e5))
+        self.assertEqual((e[0], e[-1]), (1000, 1e5))
+        self.assertEqual(f[3], self.table.evaluate(0, 0, e[3]))
+        self.assertGreater(integrate_spectrum(e, f), 0)
+
+    def test_bad_windows(self):
+        with self.assertRaises(ValueError):
+            self.table.crop(energy_range=(1, 100))       # below the table
+        with self.assertRaises(ValueError):
+            self.table.crop(theta_range=(50, 40))
+
+    def test_muons_have_no_upward_flux(self):
+        mu = FluxTable.read(os.path.join(REPO, "fluxes", "muminus_compair2_cosima.dat"))
+        self.assertIsNone(mu.crop(theta_range=(100, 180)).energy_support())
+        self.assertIsNotNone(mu.crop(theta_range=(0, 80)).energy_support())
+
+
+# ------------------------------------------------------------- cosima lint
+
+GLOBAL = {"Version", "Geometry", "PhysicsListEM", "PhysicsListHD", "StoreCalibrated",
+          "StoreSimulationInfo", "StoreSimulationInfoIonization", "DiscretizeHits",
+          "PreTriggerMode", "SelectInteractionProcess", "Run"}
+
+
+def lint_source(test, path):
+    """Check a generated .source against the token rules of MEGAlib's MCParameterFile."""
+    run, sources, seen = None, set(), {}
+    for line in read(path).splitlines():
+        tok = line.split()
+        if not tok or tok[0].startswith("#"):
+            continue
+        if "." not in tok[0]:
+            test.assertIn(tok[0], GLOBAL, path)
+            if tok[0] == "Run":
+                run = tok[1]
+            continue
+        tok = tok[0].split(".", 1) + tok[1:]   # cosima splits "Owner.Key" into two tokens
+        owner, key = tok[0], tok[1]
+        if owner == run:
+            test.assertIn(key, ("FileName", "Triggers", "Source"))
+            test.assertEqual(len(tok), 3, line)
+            if key == "Source":
+                sources.add(tok[2])
+            continue
+        test.assertIn(owner, sources, line)
+        seen.setdefault(owner, {})[key] = tok
+    test.assertIsNotNone(run)
+    test.assertTrue(sources)
+    for name in sources:
+        s = seen[name]
+        test.assertEqual(len(s["ParticleType"]), 3)
+        beam, spec = s["Beam"], s["Spectrum"]
+        kind = beam[2]
+        if kind == "FarFieldPointSource":
+            test.assertEqual(len(beam), 5)
+        elif kind == "FarFieldAreaSource":
+            test.assertEqual(len(beam), 7)
+            test.assertLess(float(beam[3]), float(beam[4]))
+            test.assertLess(float(beam[5]), float(beam[6]))
+        else:
+            test.assertEqual(kind, "FarFieldNormalizedEnergyBeamFluxFunction")
+            FluxTable.read(beam[3])
+            test.assertEqual(spec[2:], ["NormalizedEnergyBeamFluxFunction"])
+            test.assertNotIn("Flux", s)
+            continue
+        test.assertIn("Flux", s)
+        test.assertGreater(float(s["Flux"][2]), 0)
+        if spec[2] == "Linear":
+            test.assertEqual(len(spec), 5)
+            test.assertLess(float(spec[3]), float(spec[4]))
+        elif spec[2] == "PowerLaw":
+            test.assertEqual(len(spec), 6)
+        else:
+            test.assertEqual(spec[2], "File")
+            dp = [l.split() for l in read(spec[3]).splitlines() if l.startswith("DP")]
+            test.assertGreaterEqual(len(dp), 2)
+            test.assertTrue(all(len(d) == 3 and float(d[2]) >= 0 for d in dp))
+
+
+class Sandbox(unittest.TestCase):
+    """Each test gets its own output_root, site config, sims dir and fake condor."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.out = os.path.join(self.tmp, "out")
+        self.site_path = os.path.join(self.tmp, "site.ini")
+        with open(os.path.join(REPO, "config", "site.ini")) as f:
+            text = f.read().replace("output_root = /data2/SIU/sim", "output_root = %s" % self.out)
+        with open(self.site_path, "w") as f:
+            f.write(text)
+        self.site = Site(self.site_path)
+        bindir = os.path.join(self.tmp, "bin")
+        os.mkdir(bindir)
+        fake = os.path.join(bindir, "condor_submit")
+        with open(fake, "w") as f:
+            f.write("#!/bin/sh\necho \"$(wc -l < $(awk '/^queue/ {print $NF}' $1)) job(s) "
+                    "submitted to cluster 4242.\"\n")
+        os.chmod(fake, os.stat(fake).st_mode | stat.S_IEXEC)
+        self.old_path = os.environ["PATH"]
+        os.environ["PATH"] = bindir + os.pathsep + self.old_path
+
+    def tearDown(self):
+        os.environ["PATH"] = self.old_path
+        shutil.rmtree(self.tmp)
+
+    def card(self, **kw):
+        kw.setdefault("name", "t")
+        kw.setdefault("triggers", "1000")
+        kw.setdefault("jobs", "4")
+        path = os.path.join(self.tmp, "%s.ini" % kw["name"])
+        with open(path, "w") as f:
+            f.write("[simulation]\n" + "".join("%s = %s\n" % kv for kv in kw.items()))
+        return path
+
+    def run_cli(self, *args):
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            rc = cli.main(["--site", self.site_path] + list(args))
+        return rc, out.getvalue() + err.getvalue()
+
+    def prepare(self, **kw):
+        rundir, _ = build.prepare(Card(self.card(**kw), self.site), self.site)
+        return rundir
+
+    def sources(self, rundir):
+        d = os.path.join(rundir, "sources")
+        return sorted(os.path.join(d, f) for f in os.listdir(d) if f.endswith(".source"))
+
+
+class TestCards(Sandbox):
+
+    def bad(self, message, **kw):
+        with self.assertRaises(CardError) as ctx:
+            Card(self.card(**kw), self.site)
+        self.assertIn(message, str(ctx.exception))
+
+    def test_errors_are_clear(self):
+        self.bad("unknown key", mode="flat", particles="photon", emin="1", emax="2", energy="3")
+        self.bad("unknown particle", mode="flat", particles="pion", emin="1", emax="2")
+        self.bad("needs emin and emax", mode="flat", particles="photon")
+        self.bad("emax must be larger", mode="flat", particles="photon", emin="5", emax="2")
+        self.bad("only works for photons", mode="flat", particles="photon, proton",
+                 emin="1", emax="2", first_interaction="compton")
+        self.bad("first_interaction must be", mode="flat", particles="photon",
+                 emin="1", emax="2", first_interaction="rayleigh")
+        self.bad("no flux file", mode="flux", particles="antiproton")
+        self.bad("give a single phi", mode="flat", particles="photon", emin="1", emax="2",
+                 theta="30", phi="0 360")
+        self.bad("theta must be within", mode="flat", particles="photon", emin="1", emax="2",
+                 theta="0 200", phi="0 360")
+        self.bad("positive integer", mode="flat", particles="photon", emin="1", emax="2", jobs="2.5")
+
+    def test_aliases_and_scientific_notation(self):
+        c = Card(self.card(mode="flat", particles="gamma e- mu+", emin="1", emax="2",
+                           triggers="1e6"), self.site)
+        self.assertEqual(c.particles, ["photon", "electron", "muplus"])
+        self.assertEqual(c.triggers, 1000000)
+
+    def test_templates_are_valid(self):
+        for mode in ("flat", "flux", "cutoff"):
+            Card(os.path.join(REPO, "templates", mode + ".ini"), self.site)
+
+
+class TestPrepare(Sandbox):
+
+    def check_run(self, rundir, njobs, triggers):
+        jobs = cli.read_jobs(rundir)
+        self.assertEqual(len(jobs), njobs)
+        self.assertEqual(len(set(j[2] for j in jobs)), njobs, "seeds must be unique")
+        total = 0
+        for path in self.sources(rundir):
+            lint_source(self, path)
+            total += int([l for l in read(path).splitlines() if ".Triggers" in l][0].split()[1])
+        self.assertEqual(total, triggers)
+        submit = read(os.path.join(rundir, "jobs.submit"))
+        for line in ("request_cpus            = 1", "request_memory          = 2 GB",
+                     "request_disk            = 200 MB"):
+            self.assertIn(line, submit)
+        for path in self.sources(rundir):
+            text = read(path)
+            self.assertIn("StoreSimulationInfo            all", text)
+            self.assertIn("SpaceSim.Triggers", text)
+            self.assertNotIn(".Events", text)
+            self.assertNotIn(".Time", text)
+
+    def test_flat_onaxis_with_first_interaction(self):
+        rundir = self.prepare(mode="flat", particles="photon", emin="100", emax="5000",
+                              triggers="1003", jobs="4", first_interaction="compton")
+        self.check_run(rundir, 4, 1003)
+        text = read(self.sources(rundir)[0])
+        self.assertIn("FarFieldPointSource 0 0", text)
+        self.assertIn("SelectInteractionProcess COMP", text)
+
+    def test_flat_two_particles_separate_and_logflat(self):
+        rundir = self.prepare(mode="flat", particles="photon, proton", emin="100", emax="1e6",
+                              theta="0 60", phi="0 360", spectrum="logflat")
+        self.check_run(rundir, 8, 2000)
+        self.assertIn("PowerLaw 100 1000000 1", read(self.sources(rundir)[0]))
+
+    def test_flux_area_combined(self):
+        rundir = self.prepare(mode="flux", particles="proton he4 electron", emin="1000",
+                              emax="1e5", theta="0 90", phi="0 360")
+        self.check_run(rundir, 4, 1000)
+        self.assertEqual(sorted(os.listdir(os.path.join(rundir, "inputs"))),
+                         ["electron_flux.dat", "he4_flux.dat", "proton_flux.dat"])
+        t = FluxTable.read(os.path.join(rundir, "inputs", "proton_flux.dat"))
+        self.assertEqual((t.energy[0], t.energy[-1], t.theta[-1]), (1000, 1e5, 90))
+
+    def test_flux_onaxis_uses_spectrum_file(self):
+        rundir = self.prepare(mode="flux", particles="photon", emin="100", emax="1e4", theta="0")
+        self.check_run(rundir, 4, 1000)
+        self.assertIn("Photon.Spectrum        File ", read(self.sources(rundir)[0]))
+
+    def test_flux_full_range_and_clipping(self):
+        card = Card(self.card(mode="flux", particles="photon", emin="1", emax="1e9"), self.site)
+        _, summary = build.prepare(card, self.site)
+        self.assertIn("clipped", summary)
+
+    def test_flux_no_flux_in_window(self):
+        with self.assertRaises(CardError):
+            self.prepare(mode="flux", particles="muminus", theta="120 180", phi="0 360")
+
+    def test_cutoff_uses_flux_file_range(self):
+        rundir = self.prepare(mode="cutoff", particles="photon neutron pho511", theta="0 90",
+                              phi="0 360")
+        self.check_run(rundir, 12, 3000)
+        text = "".join(read(p) for p in self.sources(rundir))
+        self.assertIn("Linear 22.536 89716", text)
+        self.assertIn("Linear 89.717 897160000", text)
+        self.assertIn("Linear 510.95 511.05", text)
+
+    def test_existing_run_is_never_overwritten(self):
+        self.prepare(mode="flat", particles="photon", emin="1", emax="2")
+        with self.assertRaises(CardError):
+            self.prepare(mode="flat", particles="photon", emin="1", emax="2")
+
+    def test_failed_prepare_leaves_nothing(self):
+        with self.assertRaises(CardError):
+            self.prepare(mode="flux", particles="proton muminus", theta="120 180", phi="0 360")
+        self.assertEqual(os.listdir(self.out), [])
+
+
+class TestWrapper(Sandbox):
+    """Run lib/run_cosima.sh with a fake MEGAlib whose 'cosima' succeeds or crashes."""
+
+    def run_wrapper(self, cosima_body):
+        rundir = self.prepare(mode="flat", particles="photon", emin="1", emax="2", jobs="1")
+        fakebin = os.path.join(self.tmp, "megalib", "bin")
+        os.makedirs(fakebin)
+        cosima = os.path.join(fakebin, "cosima")
+        with open(cosima, "w") as f:
+            f.write("#!/bin/bash\nOUT=$(awk '$1 ~ /FileName$/ {print $2}' \"$3\")\n" + cosima_body)
+        os.chmod(cosima, 0o755)
+        setup = os.path.join(self.tmp, "megalib", "source-megalib.sh")
+        with open(setup, "w") as f:
+            f.write("export PATH=%s:$PATH\n" % fakebin)
+        job, source, seed = cli.read_jobs(rundir)[0]
+        env = dict(os.environ, MEGALIB_SETUP=setup, HOME=self.tmp)
+        rc = subprocess.call([os.path.join(rundir, "run_cosima.sh"), source, seed], env=env,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return rc, source[:-len(".source")]
+
+    def test_success_writes_done(self):
+        rc, mark = self.run_wrapper('[ "$1" = "-s" ] || exit 3\ntouch "$OUT.inc1.id1.sim.gz"\n')
+        self.assertEqual(rc, 0)
+        self.assertTrue(os.path.exists(mark + ".done"))
+
+    def test_crash_writes_failed(self):
+        rc, mark = self.run_wrapper("exit 255\n")
+        self.assertEqual(rc, 1)
+        self.assertIn("code 255", read(mark + ".failed"))
+
+    def test_no_output_is_a_failure(self):
+        rc, mark = self.run_wrapper("exit 0\n")
+        self.assertIn("no output", read(mark + ".failed"))
+
+
+class TestWorkflow(Sandbox):
+
+    def test_new_submit_status_resubmit(self):
+        rc, out = self.run_cli("submit", self.card(name="wf", mode="flat", particles="photon",
+                                                   emin="1", emax="2", jobs="5"))
+        self.assertEqual(rc, 0, out)
+        self.assertIn("5 job(s) submitted", out)
+        rundir = os.path.join(self.out, "wf")
+
+        rc, out = self.run_cli("submit", rundir)
+        self.assertEqual(rc, 1)
+        self.assertIn("already submitted", out)
+
+        # pretend: 3 done, 1 failed with a partial output, 1 lost
+        src = self.sources(rundir)
+        for p in src[:3]:
+            open(p[:-7] + ".done", "w").close()
+        with open(src[3][:-7] + ".failed", "w") as f:
+            f.write("cosima exited with code 255")
+        open(os.path.join(rundir, "sim", "photon_0004.inc1.id1.sim.gz"), "w").close()
+
+        rc, out = self.run_cli("status", "wf")
+        self.assertIn("done         3 / 5", out)
+        self.assertIn("photon_0004: cosima exited with code 255", out)
+        self.assertIn("pending      1", out)
+
+        rc, out = self.run_cli("resubmit", rundir)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("2 job(s) submitted", out)
+        lines = read(os.path.join(rundir, "jobs.resubmit1.list")).split("\n")
+        self.assertEqual([l.split()[0] for l in lines if l], ["photon_0004", "photon_0005"])
+        self.assertTrue(os.path.exists(os.path.join(rundir, "sim", "incomplete",
+                                                    "photon_0004.inc1.id1.sim.gz")))
+        self.assertIn("jobs.resubmit1.list", read(os.path.join(rundir, "jobs.resubmit1.submit")))
+
+    def test_new_creates_card(self):
+        name = "zz_unittest_card"
+        target = os.path.join(REPO, "sims", name + ".ini")
+        try:
+            rc, out = self.run_cli("new", "flux", name)
+            self.assertEqual(rc, 0, out)
+            self.assertEqual(Card(target, self.site).name, name)
+        finally:
+            if os.path.exists(target):
+                os.remove(target)
+
+    def test_info(self):
+        rc, out = self.run_cli("info", "--theta", "0 90", "--phi", "0 360")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("22.54 - 8.972e+04", out)
+
+
+if __name__ == "__main__":
+    unittest.main()
