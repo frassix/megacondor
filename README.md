@@ -36,6 +36,7 @@ One `[simulation]` section. Templates with comments are in `templates/`.
 | `theta`             | `0` = on-axis, one value = point source, `min max` = range (deg)       | `0`             |
 | `phi`               | one value with a single theta, `min max` with a theta range            | `0` / `0 360`   |
 | `spectrum`          | `flat` or `logflat` (equal counts per decade), flat and cutoff modes   | `flat`          |
+| `binning`           | `none`, `linear` or `log`: one energy bin per job (flat and cutoff modes) | `none`       |
 | `first_interaction` | photons only: `any`, `photo`, `compton`, `pair`                        | `any`           |
 | `combine`           | `yes`: all particles in one simulation, at their real relative rates   | flux: `yes`, else `no` |
 | `geometry`          | another `.geo.setup`                                                   | ComPair (site.ini) |
@@ -44,6 +45,11 @@ One `[simulation]` section. Templates with comments are in `templates/`.
 **Several particles.** With `combine = no` every particle gets its own `jobs` jobs and `triggers` triggers.
 With `combine = yes` there is one set of jobs simulating the mix; in flux mode the mix has the real
 relative rates from the `.dat` files.
+
+**Energy bins.** With `binning = linear` (or `log`) the energy range is split into `jobs` contiguous bins
+and each job simulates one bin, with `triggers / jobs` triggers. Example: `emin = 100`, `emax = 1000`,
+`jobs = 50` gives 100-118, 118-136, ..., 982-1000 keV. `bins.txt` in the run directory maps each job
+(and so each output file) to its bin. With `binning = log` the bins have equal width in log(E).
 
 **Direction.** theta is the angle the particle comes *from*, measured from the instrument axis (cosima far field).
 In flux mode the `.dat` table is cut to the theta/phi window, so the angular distribution stays realistic.

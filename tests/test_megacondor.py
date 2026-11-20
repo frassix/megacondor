@@ -307,6 +307,52 @@ class TestPrepare(Sandbox):
         self.assertEqual(os.listdir(self.out), [])
 
 
+class TestBinning(Sandbox):
+
+    def spectra(self, rundir):
+        return [[l.split()[1:] for l in read(p).splitlines() if ".Spectrum" in l]
+                for p in self.sources(rundir)]
+
+    def test_linear_bins_one_per_job(self):
+        rundir = self.prepare(mode="flat", particles="proton", emin="100", emax="1000",
+                              jobs="50", triggers="100000", binning="linear")
+        spectra = [s[0] for s in self.spectra(rundir)]
+        self.assertEqual(len(spectra), 50)
+        self.assertEqual(spectra[0], ["Linear", "100", "118"])
+        self.assertEqual(spectra[1], ["Linear", "118", "136"])
+        self.assertEqual(spectra[-1], ["Linear", "982", "1000"])
+        for a, b in zip(spectra, spectra[1:]):
+            self.assertEqual(a[2], b[1], "bins must be contiguous")
+        rows = [l.split() for l in read(os.path.join(rundir, "bins.txt")).splitlines()[1:]]
+        self.assertEqual(rows[0], ["proton_0001", "proton", "100", "118"])
+        for path in self.sources(rundir):
+            lint_source(self, path)
+            self.assertIn("SpaceSim.Triggers         2000", read(path))
+
+    def test_log_bins_with_cutoff_and_two_particles(self):
+        rundir = self.prepare(mode="cutoff", particles="photon neutron", jobs="10",
+                              theta="0 60", phi="0 360", binning="log", spectrum="logflat")
+        spectra = [s[0] for s in self.spectra(rundir)]
+        self.assertEqual(len(spectra), 20)
+        photon = spectra[10:]   # files sort as neutron_*, photon_*
+        self.assertEqual(photon[0][:2], ["PowerLaw", "22.536"])
+        self.assertEqual(photon[-1][2], "89716")
+        ratios = [float(s[2]) / float(s[1]) for s in photon]
+        for r in ratios:
+            self.assertAlmostEqual(r, ratios[0], places=6)
+
+    def test_combined_bins_hold_all_particles(self):
+        rundir = self.prepare(mode="flat", particles="photon proton", emin="100", emax="200",
+                              jobs="4", combine="yes", binning="linear")
+        spectra = self.spectra(rundir)
+        self.assertEqual(len(spectra), 4)
+        self.assertEqual(spectra[3], [["Linear", "175", "200"], ["Linear", "175", "200"]])
+
+    def test_binning_needs_flat_spectrum(self):
+        with self.assertRaises(CardError):
+            Card(self.card(mode="flux", particles="proton", binning="linear"), self.site)
+
+
 class TestWrapper(Sandbox):
     """Run lib/run_cosima.sh with a fake MEGAlib whose 'cosima' succeeds or crashes."""
 
