@@ -27,6 +27,7 @@ ALIASES = {
 }
 MODES = ("flat", "flux", "cutoff")
 SPECTRA = ("flat", "logflat")
+BINNINGS = ("none", "linear", "log")
 
 
 class CardError(Exception):
@@ -74,7 +75,7 @@ class Site(object):
 
 CARD_KEYS = {
     "name", "mode", "particles", "triggers", "jobs", "emin", "emax", "theta", "phi",
-    "first_interaction", "spectrum", "combine", "geometry", "seed", "output_root",
+    "first_interaction", "spectrum", "combine", "geometry", "seed", "output_root", "binning",
 }
 
 
@@ -103,6 +104,9 @@ class Card(object):
         self.triggers = _positive_int(_required(get("triggers"), "triggers"), "triggers")
         self.jobs = _positive_int(get("jobs", "1"), "jobs")
         self.spectrum = _choice(get("spectrum", "flat"), SPECTRA, "spectrum")
+        self.binning = _choice(get("binning", "none"), BINNINGS, "binning")
+        if self.binning != "none" and self.mode == "flux":
+            raise CardError("binning works with flat spectra only (mode = flat or cutoff)")
         self.combine = _yesno(get("combine", "yes" if self.mode == "flux" else "no"), "combine")
         self.geometry = get("geometry", site.geometry)
         self.output_root = get("output_root", site.output_root)
