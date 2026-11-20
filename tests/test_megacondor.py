@@ -408,7 +408,9 @@ class TestWrapper(Sandbox):
         os.chmod(cosima, 0o755)
         setup = os.path.join(self.tmp, "megalib", "source-megalib.sh")
         with open(setup, "w") as f:
-            f.write("export PATH=%s:$PATH\n" % fakebin)
+            # like the real one: ROOT's thisroot.sh sets SOURCE, others set generic names
+            f.write("export PATH=%s:$PATH\nSOURCE=/x/thisroot.sh\nSEED=1\nOUTPUT=\nMARK=/x\n"
+                    "RC=0\nfail() { :; }\n" % fakebin)
         job, source, seed = cli.read_jobs(rundir)[0]
         env = dict(os.environ, MEGALIB_SETUP=setup, HOME=self.tmp)
         rc = subprocess.call([os.path.join(rundir, "run_cosima.sh"), source, seed], env=env,
