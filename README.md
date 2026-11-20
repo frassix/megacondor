@@ -87,10 +87,13 @@ know, so check that this matches the patched build.
 ├── jobs.submit       HTCondor submit file
 ├── jobs.list         job name, source file, seed
 ├── inputs/           flux tables / spectra cut to your window (flux mode)
-├── sources/          one .source per job, plus .done / .failed markers
+├── sources/          one .source per job, plus .progress / .done / .failed markers
 ├── sim/              <job>.inc1.id1.sim.gz
-└── logs/             condor.log, <job>.out, <job>.err
+└── logs/             condor.log, <job>.out, <job>.err  (or in log_dir, if the card sets it)
 ```
+
+The logs are short: cosima's one-line-per-event output goes to `<job>.progress`
+instead, and the `.out` only gets a `progress:` line every 10%.
 
 An existing run directory is never overwritten: change `name` for a new run.
 
@@ -102,10 +105,11 @@ An existing run directory is never overwritten: change `name` for a new run.
 | `info [--theta ..] [--phi ..]`       | particles, energy ranges and fluxes of the `.dat` files         |
 | `prepare <card>`                     | build the run directory, do not submit                          |
 | `submit <card \| run>`               | prepare (if needed) and `condor_submit`                         |
-| `status <run>`                       | done / failed / pending jobs, and what is in the queue          |
+| `status <run>`                       | triggers done (total and per particle), jobs done / running / waiting / failed, the queue |
 | `resubmit <run>`                     | resubmit failed and lost jobs with new seeds                    |
 
-`<run>` is a run name, a run directory or its card.
+`<run>` is a run name, a run directory or its card. To follow a run live:
+`watch -n 60 ./megacondor status <run>`.
 
 ## When things go wrong
 

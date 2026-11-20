@@ -142,10 +142,9 @@ def prepare(card, site):
                                       for i in range(len(bins[group[0]]))],
                                 card.triggers, [(p, bins[p]) for p in group]))
 
-        if card.log_dir:
+        if card.log_dir:   # logs live only there, not in the run directory
             os.rmdir(os.path.join(tmp, "logs"))
             os.makedirs(logdir)
-            os.symlink(logdir, os.path.join(tmp, "logs"))  # <run>/logs points to the log directory
         jobs = write_sources(card, site, runs, tmp, rundir)
         write_submit(card, site, tmp, rundir, logdir, "jobs.submit", "jobs.list")
         shutil.copy(WRAPPER, os.path.join(tmp, "run_cosima.sh"))

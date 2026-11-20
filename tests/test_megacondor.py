@@ -156,6 +156,7 @@ class Sandbox(unittest.TestCase):
         with open(self.site_path, "w") as f:
             f.write(text)
         self.site = Site(self.site_path)
+        self.old_runs_file, cli.RUNS_FILE = cli.RUNS_FILE, os.path.join(self.tmp, "runs.txt")
         bindir = os.path.join(self.tmp, "bin")
         os.mkdir(bindir)
         fake = os.path.join(bindir, "condor_submit")
@@ -168,6 +169,7 @@ class Sandbox(unittest.TestCase):
 
     def tearDown(self):
         os.environ["PATH"] = self.old_path
+        cli.RUNS_FILE = self.old_runs_file
         shutil.rmtree(self.tmp)
 
     def card(self, **kw):
@@ -385,8 +387,9 @@ class TestBinning(Sandbox):
         logs = os.path.join(self.tmp, "repologs")
         rundir = self.prepare(name="lg", mode="flat", particles="photon", emin="1", emax="2",
                               log_dir=logs)
-        self.assertEqual(os.path.realpath(os.path.join(rundir, "logs")),
-                         os.path.realpath(os.path.join(logs, "lg")))
+        self.assertFalse(os.path.lexists(os.path.join(rundir, "logs")), "logs in one place only")
+        self.assertTrue(os.path.isdir(os.path.join(logs, "lg")))
+        self.assertEqual(cli.log_dir_of(rundir), os.path.join(logs, "lg"))
         self.assertIn("error                   = %s/$(mc_job).err" % os.path.join(logs, "lg"),
                       read(os.path.join(rundir, "jobs.submit")))
 
@@ -413,9 +416,22 @@ class TestWrapper(Sandbox):
                     "RC=0\nfail() { :; }\n" % fakebin)
         job, source, seed = cli.read_jobs(rundir)[0]
         env = dict(os.environ, MEGALIB_SETUP=setup, HOME=self.tmp)
-        rc = subprocess.call([os.path.join(rundir, "run_cosima.sh"), source, seed], env=env,
-                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        return rc, source[:-len(".source")]
+        proc = subprocess.Popen([os.path.join(rundir, "run_cosima.sh"), source, seed], env=env,
+                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                universal_newlines=True)
+        self.log = proc.communicate()[0]
+        return proc.returncode, source[:-len(".source")]
+
+    def test_progress_file_and_quiet_log(self):
+        rc, mark = self.run_wrapper(
+            'for i in $(seq 1 1000); do echo "Storing event $i of $((3*i)) at t_obs=0.1s"; done\n'
+            'echo "Geant4 says something useful"\ntouch "$OUT.inc1.id1.sim.gz"\n')
+        self.assertEqual(rc, 0, self.log)
+        self.assertEqual(read(mark + ".progress").split(), ["1000", "1000"])
+        self.assertNotIn("Storing event", self.log)
+        self.assertIn("Geant4 says something useful", self.log)
+        self.assertEqual(self.log.count("progress:"), 10)
+        self.assertIn("progress: 1000 / 1000 triggers (100%)", self.log)
 
     def test_success_writes_done(self):
         rc, mark = self.run_wrapper('[ "$1" = "-s" ] || exit 3\ntouch "$OUT.inc1.id1.sim.gz"\n')
@@ -452,11 +468,13 @@ class TestWorkflow(Sandbox):
         with open(src[3][:-7] + ".failed", "w") as f:
             f.write("cosima exited with code 255")
         open(os.path.join(rundir, "sim", "photon_0004.inc1.id1.sim.gz"), "w").close()
+        with open(src[4][:-7] + ".progress", "w") as f:   # job 5 is running: 150 of 200
+            f.write("150 200\n")
 
         rc, out = self.run_cli("status", "wf")
-        self.assertIn("done         3 / 5", out)
+        self.assertIn("75.0%  750 / 1000", out)
+        self.assertIn("3 done, 1 running, 0 waiting, 1 failed  (of 5)", out)
         self.assertIn("photon_0004: cosima exited with code 255", out)
-        self.assertIn("pending      1", out)
 
         rc, out = self.run_cli("resubmit", rundir)
         self.assertEqual(rc, 0, out)
@@ -466,6 +484,15 @@ class TestWorkflow(Sandbox):
         self.assertTrue(os.path.exists(os.path.join(rundir, "sim", "incomplete",
                                                     "photon_0004.inc1.id1.sim.gz")))
         self.assertIn("jobs.resubmit1.list", read(os.path.join(rundir, "jobs.resubmit1.submit")))
+
+    def test_status_by_name_with_own_output_root(self):
+        elsewhere = os.path.join(self.tmp, "elsewhere")
+        rc, out = self.run_cli("prepare", self.card(name="far", mode="flat", particles="photon",
+                                                    emin="1", emax="2", output_root=elsewhere))
+        self.assertEqual(rc, 0, out)
+        rc, out = self.run_cli("status", "far")
+        self.assertEqual(rc, 0, out)
+        self.assertIn(os.path.join(elsewhere, "far"), out)
 
     def test_new_creates_card(self):
         name = "zz_unittest_card"
