@@ -164,6 +164,11 @@ class Sandbox(unittest.TestCase):
             f.write("#!/bin/sh\necho \"$(wc -l < $(awk '/^queue/ {print $NF}' $1)) job(s) "
                     "submitted to cluster 4242.\"\n")
         os.chmod(fake, os.stat(fake).st_mode | stat.S_IEXEC)
+        self.queue_file = os.path.join(self.tmp, "queue.txt")
+        fake_q = os.path.join(bindir, "condor_q")
+        with open(fake_q, "w") as f:
+            f.write("#!/bin/sh\n[ -f %s ] && cat %s\nexit 0\n" % (self.queue_file, self.queue_file))
+        os.chmod(fake_q, 0o755)
         self.old_path = os.environ["PATH"]
         os.environ["PATH"] = bindir + os.pathsep + self.old_path
 
@@ -248,7 +253,8 @@ class TestPrepare(Sandbox):
             self.assertIn(line, submit)
         for path in self.sources(rundir):
             text = read(path)
-            self.assertIn("StoreSimulationInfo            all", text)
+            self.assertIn("StoreSimulationInfo            init-only", text)
+            self.assertIn("StoreSimulationInfoIonization  false", text)
             self.assertIn("SpaceSim.Triggers", text)
             self.assertNotIn(".Events", text)
             self.assertNotIn(".Time", text)
@@ -387,11 +393,20 @@ class TestBinning(Sandbox):
         logs = os.path.join(self.tmp, "repologs")
         rundir = self.prepare(name="lg", mode="flat", particles="photon", emin="1", emax="2",
                               log_dir=logs)
-        self.assertFalse(os.path.lexists(os.path.join(rundir, "logs")), "logs in one place only")
-        self.assertTrue(os.path.isdir(os.path.join(logs, "lg")))
-        self.assertEqual(cli.log_dir_of(rundir), os.path.join(logs, "lg"))
-        self.assertIn("error                   = %s/$(mc_job).err" % os.path.join(logs, "lg"),
-                      read(os.path.join(rundir, "jobs.submit")))
+        self.assertEqual(cli.condor_log_of(rundir), os.path.join(logs, "lg.condor.log"))
+        self.assertFalse(os.path.lexists(os.path.join(rundir, "logs")))
+        self.assertFalse(os.path.lexists(os.path.join(rundir, "condor.log")))
+
+    def test_one_log_per_run_and_mc_info_all(self):
+        rundir = self.prepare(mode="flat", particles="photon", emin="1", emax="2", mc_info="all")
+        submit = read(os.path.join(rundir, "jobs.submit"))
+        self.assertIn("log                     = %s/condor.log" % rundir, submit)
+        keys = [l.split("=")[0].strip() for l in submit.splitlines() if "=" in l]
+        self.assertNotIn("output", keys)
+        self.assertNotIn("error", keys)
+        text = read(self.sources(rundir)[0])
+        self.assertIn("StoreSimulationInfo            all", text)
+        self.assertIn("StoreSimulationInfoIonization  true", text)
 
     def test_binning_needs_flat_spectrum(self):
         with self.assertRaises(CardError):
@@ -427,7 +442,9 @@ class TestWrapper(Sandbox):
             'for i in $(seq 1 1000); do echo "Storing event $i of $((3*i)) at t_obs=0.1s"; done\n'
             'echo "Geant4 says something useful"\ntouch "$OUT.inc1.id1.sim.gz"\n')
         self.assertEqual(rc, 0, self.log)
-        self.assertEqual(read(mark + ".progress").split(), ["1000", "1000"])
+        self.assertTrue(os.path.exists(mark + ".done"))
+        self.assertFalse(os.path.exists(mark + ".progress"), "only .done is left behind")
+        self.assertFalse(os.path.exists(mark + ".tail"))
         self.assertNotIn("Storing event", self.log)
         self.assertIn("Geant4 says something useful", self.log)
         self.assertEqual(self.log.count("progress:"), 10)
@@ -439,9 +456,13 @@ class TestWrapper(Sandbox):
         self.assertTrue(os.path.exists(mark + ".done"))
 
     def test_crash_writes_failed(self):
-        rc, mark = self.run_wrapper("exit 255\n")
+        rc, mark = self.run_wrapper("echo 'G4Exception: out of memory'\nexit 255\n")
         self.assertEqual(rc, 1)
-        self.assertIn("code 255", read(mark + ".failed"))
+        failed = read(mark + ".failed")
+        self.assertTrue(failed.startswith("cosima exited with code 255\n"))
+        self.assertIn("host: ", failed)
+        self.assertIn("G4Exception: out of memory", failed)
+        self.assertFalse(os.path.exists(mark + ".tail"))
 
     def test_no_output_is_a_failure(self):
         rc, mark = self.run_wrapper("exit 0\n")
@@ -449,6 +470,12 @@ class TestWrapper(Sandbox):
 
 
 class TestWorkflow(Sandbox):
+
+    def queue(self, *entries):
+        """What the fake condor_q reports: (state code, source file) pairs."""
+        with open(self.queue_file, "w") as f:
+            for code, source in entries:
+                f.write("%s %s 12345 undefined\n" % (code, source))
 
     def test_new_submit_status_resubmit(self):
         rc, out = self.run_cli("submit", self.card(name="wf", mode="flat", particles="photon",
@@ -461,29 +488,50 @@ class TestWorkflow(Sandbox):
         self.assertEqual(rc, 1)
         self.assertIn("already submitted", out)
 
-        # pretend: 3 done, 1 failed with a partial output, 1 lost
+        # 3 done, job 4 failed (with a partial output), job 5 running at 150 of 200
         src = self.sources(rundir)
         for p in src[:3]:
             open(p[:-7] + ".done", "w").close()
         with open(src[3][:-7] + ".failed", "w") as f:
-            f.write("cosima exited with code 255")
+            f.write("cosima exited with code 255\nhost: node-1\n--- last lines ---\nboom\n")
         open(os.path.join(rundir, "sim", "photon_0004.inc1.id1.sim.gz"), "w").close()
-        with open(src[4][:-7] + ".progress", "w") as f:   # job 5 is running: 150 of 200
+        with open(src[4][:-7] + ".progress", "w") as f:
             f.write("150 200\n")
+        self.queue(("2", src[4]))
 
         rc, out = self.run_cli("status", "wf")
         self.assertIn("75.0%  750 / 1000", out)
-        self.assertIn("3 done, 1 running, 0 waiting, 1 failed  (of 5)", out)
-        self.assertIn("photon_0004: cosima exited with code 255", out)
+        self.assertIn("3 done, 1 running, 1 failed  (of 5)", out)
+        self.assertIn("failed photon_0004: cosima exited with code 255\n", out)
 
-        rc, out = self.run_cli("resubmit", rundir)
+        # resubmit leaves the running job alone
+        rc, out = self.run_cli("resubmit", "wf")
         self.assertEqual(rc, 0, out)
-        self.assertIn("2 job(s) submitted", out)
-        lines = read(os.path.join(rundir, "jobs.resubmit1.list")).split("\n")
-        self.assertEqual([l.split()[0] for l in lines if l], ["photon_0004", "photon_0005"])
+        self.assertIn("1 job(s) submitted", out)
         self.assertTrue(os.path.exists(os.path.join(rundir, "sim", "incomplete",
                                                     "photon_0004.inc1.id1.sim.gz")))
         self.assertIn("jobs.resubmit1.list", read(os.path.join(rundir, "jobs.resubmit1.submit")))
+
+        # job 4 now waits in the queue, job 5 was removed with condor_rm
+        self.queue(("1", src[3]))
+        rc, out = self.run_cli("status", "wf")
+        self.assertIn("60.0%  600 / 1000", out, "a removed job's partial triggers do not count")
+        self.assertIn("3 done, 1 idle, 1 stopped  (of 5)", out)
+
+        rc, out = self.run_cli("resubmit", "wf")
+        self.assertEqual(rc, 0, out)
+        lines = read(os.path.join(rundir, "jobs.resubmit2.list")).split("\n")
+        self.assertEqual([l.split()[0] for l in lines if l], ["photon_0005"])
+
+    def test_resubmit_without_condor_q_needs_force(self):
+        self.run_cli("submit", self.card(name="nq", mode="flat", particles="photon",
+                                         emin="1", emax="2", jobs="2"))
+        os.remove(os.path.join(self.tmp, "bin", "condor_q"))
+        rc, out = self.run_cli("resubmit", "nq")
+        self.assertEqual(rc, 1)
+        self.assertIn("--force", out)
+        rc, out = self.run_cli("resubmit", "nq", "--force")
+        self.assertEqual(rc, 0, out)
 
     def test_status_by_name_with_own_output_root(self):
         elsewhere = os.path.join(self.tmp, "elsewhere")

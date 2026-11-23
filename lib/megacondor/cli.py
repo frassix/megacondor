@@ -52,7 +52,7 @@ def main(argv=None):
     s = sub.add_parser("resubmit", help="resubmit jobs that did not finish")
     s.add_argument("run")
     s.add_argument("--force", action="store_true",
-                   help="resubmit even if jobs of this run are still in the queue")
+                   help="without condor_q: resubmit every job that is not done")
 
     args = p.parse_args(argv)
     if not args.command:
@@ -140,19 +140,18 @@ def cmd_submit(args, site):
 def cmd_status(args, site):
     rundir = resolve_run(args.run, site)
     jobs = read_jobs(rundir)
-    done, failed, pending = classify(jobs)
-    progress = read_progress(jobs, done)
-    queue = condor_queue(os.path.basename(rundir))
-    logdir = log_dir_of(rundir)
+    st = job_states(rundir, jobs)
 
     print("Run %s  (%s)" % (os.path.basename(rundir), rundir))
-    print("  logs: %s" % logdir)
     if not os.path.exists(os.path.join(rundir, "submitted")):
         print("  not submitted yet:  ./megacondor submit %s" % rundir)
 
-    # triggers, overall and per particle (or mix)
+    # triggers, overall and per particle (or mix): finished jobs + jobs running now
     per_tag = {}
-    for job, (n, total) in progress.items():
+    for job, source, _seed in jobs:
+        total = _triggers_in(source)
+        state = st["state"][job]
+        n = total if state == "done" else (_progress(source, total) if state == "running" else 0)
         tag = job.rsplit("_", 1)[0]
         a, b = per_tag.get(tag, (0, 0))
         per_tag[tag] = (a + n, b + total)
@@ -162,22 +161,24 @@ def cmd_status(args, site):
         for tag in sorted(per_tag):
             print("     %-10s %s" % (tag, _bar(*per_tag[tag])))
 
-    running = [j for j in pending if os.path.exists(_mark(jobs, j) + ".progress")]
-    waiting = len(pending) - len(running)
-    print("  jobs      %d done, %d running, %d waiting, %d failed  (of %d)"
-          % (len(done), len(running), waiting, len(failed), len(jobs)))
-    for job, reason in failed[:10]:
-        print("     failed %s: %s   (%s.err)" % (job, reason, os.path.join(logdir, job)))
-    if len(failed) > 10:
-        print("     ... and %d more failed" % (len(failed) - 10))
-    if queue is not None:
-        print("  condor    %s" % (", ".join("%d %s" % (n, st) for st, n in sorted(queue.items()))
-                                  or "nothing in the queue"))
-        if not queue and pending:
-            print("  -> nothing is queued but %d jobs never finished: ./megacondor resubmit %s"
-                  % (len(pending), rundir))
-    if pending and not running and os.path.exists(os.path.join(rundir, "submitted")):
-        print("  (no progress files: runs prepared before the progress feature only count finished jobs)")
+    counts = st["counts"]
+    order = ["done", "running", "idle", "held", "failed", "stopped", "waiting"]
+    print("  jobs      %s  (of %d)" % (", ".join("%d %s" % (counts[k], k) for k in order if counts.get(k)),
+                                       len(jobs)))
+    for job, reason in st["failed"][:10]:
+        print("     failed %s: %s" % (job, reason))
+    if len(st["failed"]) > 10:
+        print("     ... and %d more failed" % (len(st["failed"]) - 10))
+    if st["failed"]:
+        print("     (cosima's last lines are in sources/<job>.failed)")
+    if counts.get("held"):
+        print("  -> held jobs: see why with  condor_q -hold ; remove them with condor_rm, then resubmit")
+    if st["queue_known"] and (counts.get("failed") or counts.get("stopped")):
+        print("  -> %d failed/stopped jobs can be rerun now:  ./megacondor resubmit %s"
+              % (counts.get("failed", 0) + counts.get("stopped", 0), os.path.basename(rundir)))
+    if not st["queue_known"]:
+        print("  (condor_q not available: 'running' means the job started, it may have been removed since)")
+    print("  condor log: %s" % condor_log_of(rundir))
 
 
 def _bar(n, total, width=30):
@@ -186,19 +187,44 @@ def _bar(n, total, width=30):
     return "[%s%s] %5.1f%%  %d / %d" % ("#" * fill, "." * (width - fill), 100 * frac, n, total)
 
 
+def job_states(rundir, jobs):
+    """State of every job: done / failed (from the wrapper's markers), running /
+    idle / held (from condor_q), stopped (neither finished nor in the queue:
+    removed or killed). Without condor_q: running (started) / waiting."""
+    queue = condor_jobs(os.path.basename(rundir))
+    state, failed, counts = {}, [], {}
+    for job, source, _seed in jobs:
+        mark = source[:-len(".source")]
+        if os.path.exists(mark + ".done"):
+            s = "done"
+        elif os.path.exists(mark + ".failed"):
+            s = "failed"
+            with open(mark + ".failed") as f:
+                failed.append((job, (f.readline().strip() or "unknown error")))
+        elif queue is not None:
+            s = queue.get(source, "stopped")
+        else:
+            s = "running" if os.path.exists(mark + ".progress") else "waiting"
+        state[job] = s
+        counts[s] = counts.get(s, 0) + 1
+    return {"state": state, "failed": failed, "counts": counts, "queue_known": queue is not None}
+
+
 def cmd_resubmit(args, site):
     rundir = resolve_run(args.run, site)
-    name = os.path.basename(rundir)
     jobs = read_jobs(rundir)
-    done, failed, pending = classify(jobs)
-    todo = set(job for job, _ in failed) | set(pending)
+    st = job_states(rundir, jobs)
+    if st["queue_known"]:
+        rerun = ("failed", "stopped")       # jobs still in the queue are left alone
+    else:
+        if not args.force:
+            raise CardError("condor_q is not available, so I cannot tell which jobs are still "
+                            "running. Use --force to resubmit every job that is not done.")
+        rerun = ("failed", "running", "waiting")
+    todo = set(job for job, s in st["state"].items() if s in rerun)
     if not todo:
-        print("all %d jobs are done, nothing to resubmit" % len(jobs))
+        print("nothing to resubmit (%s)" % ", ".join("%d %s" % (n, k) for k, n in st["counts"].items()))
         return
-    queue = condor_queue(name)
-    if queue and not args.force:
-        raise CardError("%d jobs of '%s' are still in the condor queue. Wait for them, or remove "
-                        "them (condor_rm), or use --force." % (sum(queue.values()), name))
 
     # Keep partial outputs out of the way (cosima would otherwise write .inc2 files next to them).
     simdir = os.path.join(rundir, "sim")
@@ -209,7 +235,7 @@ def cmd_resubmit(args, site):
                 os.mkdir(stash)
             shutil.move(os.path.join(simdir, f), os.path.join(stash, f))
     for job in todo:
-        for ext in (".failed", ".progress"):
+        for ext in (".failed", ".progress", ".tail"):
             marker = os.path.join(rundir, "sources", job + ext)
             if os.path.exists(marker):
                 os.remove(marker)
@@ -226,7 +252,8 @@ def cmd_resubmit(args, site):
         text = f.read().replace("/jobs.list\n", "/%s\n" % list_name)
     with open(os.path.join(rundir, submit_name), "w") as f:
         f.write(text)
-    print("resubmitting %d jobs (%d failed, %d never finished)" % (len(todo), len(failed), len(pending)))
+    print("resubmitting %d jobs (%d failed, %d stopped)"
+          % (len(todo), st["counts"].get("failed", 0), len(todo) - st["counts"].get("failed", 0)))
     if os.path.isdir(stash):
         print("partial outputs moved to %s" % stash)
     condor_submit(rundir, submit_name, os.path.join(rundir, "submitted"))
@@ -279,44 +306,12 @@ def read_jobs(rundir):
         return [tuple(line.split()) for line in f if line.strip()]
 
 
-def classify(jobs):
-    done, failed, pending = [], [], []
-    for job, source, _seed in jobs:
-        mark = source[:-len(".source")]
-        if os.path.exists(mark + ".done"):
-            done.append(job)
-        elif os.path.exists(mark + ".failed"):
-            with open(mark + ".failed") as f:
-                failed.append((job, f.read().strip() or "unknown error"))
-        else:
-            pending.append(job)
-    return done, failed, pending
-
-
-def _mark(jobs, job):
-    for j, source, _seed in jobs:
-        if j == job:
-            return source[:-len(".source")]
-    raise KeyError(job)
-
-
-def read_progress(jobs, done):
-    """{job: (triggers so far, triggers wanted)}, from the .progress files the
-    wrapper writes (done jobs count in full, jobs not started yet as 0)."""
-    done = set(done)
-    out = {}
-    for job, source, _seed in jobs:
-        mark = source[:-len(".source")]
-        total = _triggers_in(source)
-        n = total if job in done else 0
-        if job not in done and os.path.exists(mark + ".progress"):
-            try:
-                with open(mark + ".progress") as f:
-                    n = min(int(f.read().split()[0]), total)
-            except (ValueError, IndexError, OSError):
-                pass   # being rewritten right now
-        out[job] = (n, total)
-    return out
+def _progress(source, total):
+    try:
+        with open(source[:-len(".source")] + ".progress") as f:
+            return min(int(f.read().split()[0]), total)
+    except (ValueError, IndexError, OSError):
+        return 0   # not there, or being rewritten right now
 
 
 def _triggers_in(source):
@@ -328,35 +323,39 @@ def _triggers_in(source):
     return 0
 
 
-def log_dir_of(rundir):
-    """The log directory, as written in the run's submit file."""
+def condor_log_of(rundir):
+    """The run's HTCondor log, as written in its submit file."""
     with open(os.path.join(rundir, "jobs.submit")) as f:
         for line in f:
             tok = line.split("=", 1)
             if tok[0].strip() == "log":
-                return os.path.dirname(tok[1].strip())
-    return os.path.join(rundir, "logs")
+                return tok[1].strip()
+    return None
 
 
-CONDOR_STATES = {"1": "idle", "2": "running", "3": "removed", "4": "completed", "5": "held",
-                 "6": "transferring", "7": "suspended"}
+CONDOR_STATES = {"1": "idle", "2": "running", "3": "stopped", "4": "running", "5": "held",
+                 "6": "running", "7": "held"}   # removing / completing / transferring / suspended
 
 
-def condor_queue(batch_name):
-    """{state: count} of this run's jobs in the queue, or None if condor_q is unavailable."""
+def condor_jobs(batch_name):
+    """{source file: state} for this run's jobs in the condor queue,
+    or None if condor_q is not available."""
     if not shutil.which("condor_q"):
         return None
     try:
         out = subprocess.check_output(
-            ["condor_q", "-constraint", 'JobBatchName == "%s"' % batch_name, "-af", "JobStatus"],
+            ["condor_q", "-constraint", 'JobBatchName == "%s"' % batch_name,
+             "-af", "JobStatus", "Args", "Arguments"],
             universal_newlines=True, stderr=subprocess.DEVNULL)
     except (subprocess.CalledProcessError, OSError):
         return None
-    counts = {}
-    for code in out.split():
-        state = CONDOR_STATES.get(code, "state " + code)
-        counts[state] = counts.get(state, 0) + 1
-    return counts
+    jobs = {}
+    for line in out.splitlines():
+        tok = line.split()
+        sources = [t for t in tok[1:] if t.endswith(".source")]
+        if tok and sources:
+            jobs[sources[0]] = CONDOR_STATES.get(tok[0], "in queue")
+    return jobs
 
 
 def condor_submit(rundir, submit_name, marker):

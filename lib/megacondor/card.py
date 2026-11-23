@@ -28,6 +28,7 @@ ALIASES = {
 MODES = ("flat", "flux", "cutoff")
 SPECTRA = ("flat", "logflat")
 BINNINGS = ("none", "linear", "log")
+MC_INFO = ("init-only", "all")
 
 
 class CardError(Exception):
@@ -76,7 +77,7 @@ class Site(object):
 CARD_KEYS = {
     "name", "mode", "particles", "triggers", "jobs", "emin", "emax", "theta", "phi",
     "first_interaction", "spectrum", "combine", "geometry", "seed", "output_root", "binning",
-    "bin_width", "log_dir",
+    "bin_width", "log_dir", "mc_info",
 }
 
 
@@ -117,6 +118,7 @@ class Card(object):
                 raise CardError("with bin_width there is one job per bin: remove 'jobs'")
         if self.binning != "none" and self.mode == "flux":
             raise CardError("binning works with flat spectra only (mode = flat or cutoff)")
+        self.mc_info = _choice(get("mc_info", "init-only"), MC_INFO, "mc_info")
         self.combine = _yesno(get("combine", "yes" if self.mode == "flux" else "no"), "combine")
         self.geometry = get("geometry", site.geometry)
         self.output_root = get("output_root", site.output_root)
