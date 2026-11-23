@@ -125,9 +125,17 @@ def cmd_prepare(args, site):
 def cmd_submit(args, site):
     if os.path.isfile(args.target) and args.target.endswith(".ini"):
         card = Card(args.target, site)
-        rundir, summary = build.prepare(card, site)
-        remember_run(card.name, rundir)
-        print(summary + "\n")
+        rundir = os.path.abspath(os.path.join(card.output_root, card.name))
+        if os.path.isfile(os.path.join(rundir, "jobs.list")):
+            # already prepared: submit it, if it was prepared from this same card
+            with open(card.path) as a, open(os.path.join(rundir, "card.ini")) as b:
+                if a.read() != b.read():
+                    raise CardError("run '%s' already exists (%s) and was prepared from a different "
+                                    "card. Change 'name' in the card for a new run." % (card.name, rundir))
+        else:
+            rundir, summary = build.prepare(card, site)
+            remember_run(card.name, rundir)
+            print(summary + "\n")
     else:
         rundir = resolve_run(args.target, site)
     marker = os.path.join(rundir, "submitted")
@@ -277,7 +285,11 @@ def resolve_run(target, site):
             path = known_runs().get(target, path)
     path = os.path.abspath(path)
     if not os.path.isfile(os.path.join(path, "jobs.list")):
-        raise CardError("no prepared run found at %s" % path)
+        names = sorted(known_runs())
+        raise CardError("no prepared run called '%s'.\n"
+                        "A run is named by the 'name' line inside the card, not by the card's file name.\n"
+                        "You can also give the card itself (sims/<file>.ini) or the run directory.%s"
+                        % (target, ("\nRuns prepared here: " + ", ".join(names)) if names else ""))
     return path
 
 

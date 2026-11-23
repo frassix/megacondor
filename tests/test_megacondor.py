@@ -533,6 +533,25 @@ class TestWorkflow(Sandbox):
         rc, out = self.run_cli("resubmit", "nq", "--force")
         self.assertEqual(rc, 0, out)
 
+    def test_card_file_works_after_prepare(self):
+        card = self.card(name="inside_name", mode="flat", particles="photon", emin="1", emax="2")
+        rc, out = self.run_cli("prepare", card)
+        self.assertEqual(rc, 0, out)
+        rc, out = self.run_cli("submit", "t")          # the file name is not the run name
+        self.assertEqual(rc, 1)
+        self.assertIn("named by the 'name' line", out)
+        self.assertIn("inside_name", out)
+        rc, out = self.run_cli("status", card)
+        self.assertEqual(rc, 0, out)
+        rc, out = self.run_cli("submit", card)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("4 job(s) submitted", out)
+        with open(card, "a") as f:
+            f.write("seed = 7\n")
+        rc, out = self.run_cli("submit", card)
+        self.assertEqual(rc, 1)
+        self.assertIn("different card", out)
+
     def test_status_by_name_with_own_output_root(self):
         elsewhere = os.path.join(self.tmp, "elsewhere")
         rc, out = self.run_cli("prepare", self.card(name="far", mode="flat", particles="photon",
