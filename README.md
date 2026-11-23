@@ -11,6 +11,8 @@ nano sims/my_photons.ini                  # 2. edit it
 
 Use `prepare` instead of `submit` to build everything and look at it first.
 
+Just the steps, with example cards: [HOWTO.md](HOWTO.md).
+
 ## The three modes
 
 | `mode`   | Spectrum                                   | Energy range                                  | Typical use                 |
@@ -39,7 +41,8 @@ One `[simulation]` section. Templates with comments are in `templates/`.
 | `binning`           | `none`, `linear` or `log`: one energy bin per job (flat and cutoff modes) | `none`       |
 | `bin_width`         | linear bins of this width in keV, one job per bin (replaces `jobs`)    |                 |
 | `output_root`       | where the run directory goes                                           | site.ini        |
-| `log_dir`           | put the condor logs in `<log_dir>/<name>/` (relative = inside the repo) | in the run dir |
+| `log_dir`           | put the run's condor log in `<log_dir>/<name>.condor.log` (relative = inside the repo) | in the run dir |
+| `mc_info`           | `init-only` (initial particle + interactions summary) or `all` (full MC truth, much bigger files) | `init-only` |
 | `first_interaction` | photons only: `any`, `photo`, `compton`, `pair`                        | `any`           |
 | `combine`           | `yes`: all particles in one simulation, at their real relative rates   | flux: `yes`, else `no` |
 | `geometry`          | another `.geo.setup`                                                   | ComPair (site.ini) |
@@ -63,7 +66,7 @@ A single direction uses the spectrum of the `.dat` file in that direction.
 ## Always the same (not configurable)
 
 * **1 CPU, 2 GB memory, 200 MB disk per job.** The cluster kills jobs that ask for more.
-* **Full Monte Carlo information**: `StoreSimulationInfo all` and `StoreSimulationInfoIonization true`.
+* **Monte Carlo information**: `StoreSimulationInfo init-only` by default; `mc_info = all` in the card stores everything (with ionization).
 * **Triggers only**: every run stops after a number of triggers, and only triggered events are stored.
 * **A different seed for every job.** cosima's default seed is the clock, so jobs that start in the same second would produce identical events.
 
@@ -89,11 +92,11 @@ know, so check that this matches the patched build.
 ├── inputs/           flux tables / spectra cut to your window (flux mode)
 ├── sources/          one .source per job, plus .progress / .done / .failed markers
 ├── sim/              <job>.inc1.id1.sim.gz
-└── logs/             condor.log, <job>.out, <job>.err  (or in log_dir, if the card sets it)
+└── condor.log        the one HTCondor log of the run (or <log_dir>/<name>.condor.log)
 ```
 
-The logs are short: cosima's one-line-per-event output goes to `<job>.progress`
-instead, and the `.out` only gets a `progress:` line every 10%.
+There are no per-job log files. A job that fails writes the reason, the host and the last
+40 lines of cosima's output into `sources/<job>.failed`; a job that succeeds leaves only `<job>.done`.
 
 An existing run directory is never overwritten: change `name` for a new run.
 
@@ -105,8 +108,8 @@ An existing run directory is never overwritten: change `name` for a new run.
 | `info [--theta ..] [--phi ..]`       | particles, energy ranges and fluxes of the `.dat` files         |
 | `prepare <card>`                     | build the run directory, do not submit                          |
 | `submit <card \| run>`               | prepare (if needed) and `condor_submit`                         |
-| `status <run>`                       | triggers done (total and per particle), jobs done / running / waiting / failed, the queue |
-| `resubmit <run>`                     | resubmit failed and lost jobs with new seeds                    |
+| `status <run>`                       | triggers done (total and per particle), jobs done / running / idle / held / failed / stopped |
+| `resubmit <run>`                     | rerun failed and stopped (removed, killed) jobs with new seeds; jobs still in the queue are left alone |
 
 `<run>` is a run name, a run directory or its card. To follow a run live:
 `watch -n 60 ./megacondor status <run>`.
@@ -116,8 +119,9 @@ An existing run directory is never overwritten: change `name` for a new run.
 | Symptom                                   | Look at / do                                                         |
 |-------------------------------------------|----------------------------------------------------------------------|
 | jobs stay idle                            | `condor_q -better-analyze <cluster>`                                 |
-| `status` shows failed jobs                | the reason is printed; details in `logs/<job>.err` and `.out`        |
-| pending jobs but nothing in the queue     | killed by the cluster (often memory): `./megacondor resubmit <run>`  |
+| `status` shows failed jobs                | the reason is printed; cosima's last lines are in `sources/<job>.failed` |
+| `status` shows stopped jobs               | removed or killed by the cluster (often memory): `./megacondor resubmit <run>` |
+| `status` shows held jobs                  | `condor_q -hold` says why; `condor_rm` them, then resubmit           |
 | `cosima not found`                        | `[megalib] setup` in `config/site.ini`                               |
 | ROOT complains about `HOME`               | `[megalib] home` in `config/site.ini`                                |
 
