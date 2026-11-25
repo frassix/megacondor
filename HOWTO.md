@@ -27,7 +27,8 @@ name, which is the `name = ...` line inside the card (not the file name).
    ```bash
    ./megacondor submit sims/my_run.ini
    ```
-5. Follow it (Ctrl-C to stop watching):
+5. Follow it (Ctrl-C to stop watching). It lists the running jobs with particle, energy,
+   spectrum, progress and time left; add `--all` to list every unfinished job:
    ```bash
    watch -n 60 ./megacondor status sims/my_run.ini
    ```
