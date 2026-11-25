@@ -108,7 +108,7 @@ An existing run directory is never overwritten: change `name` for a new run.
 | `info [--theta ..] [--phi ..]`       | particles, energy ranges and fluxes of the `.dat` files         |
 | `prepare <card>`                     | build the run directory, do not submit                          |
 | `submit <card \| run>`               | prepare (if needed) and `condor_submit`                         |
-| `status <run>`                       | triggers done (total and per particle), jobs done / running / idle / held / failed / stopped |
+| `status <run> [--all]`               | triggers done (total and per particle), jobs done / running / idle / held / failed / stopped, and a table of the running jobs (`--all`: every unfinished job) |
 | `resubmit <run>`                     | rerun failed and stopped (removed, killed) jobs with new seeds; jobs still in the queue are left alone |
 
 `<run>` is a run name, a run directory or its card. To follow a run live:

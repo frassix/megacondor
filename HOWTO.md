@@ -1,6 +1,8 @@
 # How to run simulations
 
 All commands are run from the repository folder on the HTCondor submit node.
+Every command takes the card file (`sims/my_run.ini`). Only `condor_rm` needs the run's
+name, which is the `name = ...` line inside the card (not the file name).
 
 ## Once
 
@@ -23,13 +25,14 @@ All commands are run from the repository folder on the HTCondor submit node.
    ```
 4. Submit:
    ```bash
-   ./megacondor submit my_run
+   ./megacondor submit sims/my_run.ini
    ```
-5. Follow it (Ctrl-C to stop watching):
+5. Follow it (Ctrl-C to stop watching). It lists the running jobs with particle, energy,
+   spectrum, progress and time left; add `--all` to list every unfinished job:
    ```bash
-   watch -n 60 ./megacondor status my_run
+   watch -n 60 ./megacondor status sims/my_run.ini
    ```
-6. Results: `<output_root>/my_run/sim/*.sim.gz`. For binned runs, `bins.txt` says which file is which energy bin.
+6. Results: `<output_root>/<name>/sim/*.sim.gz`. For binned runs, `bins.txt` says which file is which energy bin.
 
 To change anything after `prepare`: edit the card, give it a new `name`, and start again from step 3.
 
@@ -37,20 +40,20 @@ To change anything after `prepare`: edit the card, give it a new `name`, and sta
 
 | `status` says | Do                                                                                   |
 |---------------|--------------------------------------------------------------------------------------|
-| `failed`      | read `<output_root>/my_run/sources/<job>.failed`, fix the cause, then `./megacondor resubmit my_run` |
-| `stopped`     | `./megacondor resubmit my_run`                                                       |
+| `failed`      | read `<output_root>/<name>/sources/<job>.failed`, fix the cause, then `./megacondor resubmit sims/my_run.ini` |
+| `stopped`     | `./megacondor resubmit sims/my_run.ini`                                              |
 | `held`        | `condor_q -hold` to see why, then remove them and resubmit (below)                    |
 
-Remove jobs from the queue:
+Remove jobs from the queue (replace `hadrons` with the `name` in your card):
 ```bash
-condor_rm -constraint 'JobBatchName == "my_run"'
+condor_rm -constraint 'JobBatchName == "hadrons"'
 ```
 ```bash
-condor_rm -constraint 'JobBatchName == "my_run" && JobStatus == 5'
+condor_rm -constraint 'JobBatchName == "hadrons" && JobStatus == 5'
 ```
 The first removes the whole run, the second only its held jobs. Then rerun what is missing:
 ```bash
-./megacondor resubmit my_run
+./megacondor resubmit sims/my_run.ini
 ```
 
 ## Example cards

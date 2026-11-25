@@ -7,6 +7,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import time
 import tempfile
 import unittest
 from contextlib import redirect_stdout, redirect_stderr
@@ -408,6 +409,19 @@ class TestBinning(Sandbox):
         self.assertIn("StoreSimulationInfo            all", text)
         self.assertIn("StoreSimulationInfoIonization  true", text)
 
+    def test_describe_job(self):
+        rundir = self.prepare(name="d1", mode="cutoff", particles="proton he4", jobs="50",
+                              theta="0 60", phi="0 360", binning="log", spectrum="logflat")
+        src = dict((os.path.basename(p), p) for p in self.sources(rundir))
+        self.assertEqual(cli.describe_job(src["proton_0001.source"]), ("proton", "11.3-16.2 keV", "logflat"))
+        self.assertEqual(cli.describe_job(src["he4_0050.source"]), ("he4", "624-897 GeV", "logflat"))
+        rundir = self.prepare(name="d2", mode="flux", particles="proton he4", emin="900", emax="2e4",
+                              theta="0 90", phi="0 360")
+        self.assertEqual(cli.describe_job(self.sources(rundir)[0]),
+                         ("proton+he4", "900 keV - 20 MeV", "flux"))
+        rundir = self.prepare(name="d3", mode="flux", particles="photon", emin="100", emax="1e4")
+        self.assertEqual(cli.describe_job(self.sources(rundir)[0]), ("photon", "100 keV - 10 MeV", "flux"))
+
     def test_binning_needs_flat_spectrum(self):
         with self.assertRaises(CardError):
             Card(self.card(mode="flux", particles="proton", binning="linear"), self.site)
@@ -472,10 +486,13 @@ class TestWrapper(Sandbox):
 class TestWorkflow(Sandbox):
 
     def queue(self, *entries):
-        """What the fake condor_q reports: (state code, source file) pairs."""
+        """What the fake condor_q reports: (state code, source file) pairs. Columns as
+        asked by cli.condor_jobs: JobStatus ClusterId ProcId JobCurrentStartDate RemoteHost Args Arguments"""
         with open(self.queue_file, "w") as f:
-            for code, source in entries:
-                f.write("%s %s 12345 undefined\n" % (code, source))
+            for i, (code, source) in enumerate(entries):
+                start, host = ("%d" % (time.time() - 3600), "slot1@node-054.fermi") if code == "2" \
+                    else ("undefined", "undefined")
+                f.write("%s 4242 %d %s %s %s 12345 undefined\n" % (code, i, start, host, source))
 
     def test_new_submit_status_resubmit(self):
         rc, out = self.run_cli("submit", self.card(name="wf", mode="flat", particles="photon",
@@ -502,6 +519,14 @@ class TestWorkflow(Sandbox):
         rc, out = self.run_cli("status", "wf")
         self.assertIn("75.0%  750 / 1000", out)
         self.assertIn("3 done, 1 running, 1 failed  (of 5)", out)
+        # running jobs table: job, condor id, host, particle, energy, spectrum, progress, runtime, left
+        row = [l for l in out.splitlines() if l.strip().startswith("photon_0005")][0].split()
+        self.assertEqual(row[:6], ["photon_0005", "4242.0", "node-054", "photon", "1-2", "keV"])
+        self.assertEqual(row[6], "flat")
+        self.assertIn("75%", row)
+        self.assertEqual(row[-2:], ["1h00m", "20m"])
+        rc, out = self.run_cli("status", "wf", "--all")
+        self.assertIn("photon_0004  failed", out)
         self.assertIn("failed photon_0004: cosima exited with code 255\n", out)
 
         # resubmit leaves the running job alone
@@ -532,6 +557,25 @@ class TestWorkflow(Sandbox):
         self.assertIn("--force", out)
         rc, out = self.run_cli("resubmit", "nq", "--force")
         self.assertEqual(rc, 0, out)
+
+    def test_card_file_works_after_prepare(self):
+        card = self.card(name="inside_name", mode="flat", particles="photon", emin="1", emax="2")
+        rc, out = self.run_cli("prepare", card)
+        self.assertEqual(rc, 0, out)
+        rc, out = self.run_cli("submit", "t")          # the file name is not the run name
+        self.assertEqual(rc, 1)
+        self.assertIn("named by the 'name' line", out)
+        self.assertIn("inside_name", out)
+        rc, out = self.run_cli("status", card)
+        self.assertEqual(rc, 0, out)
+        rc, out = self.run_cli("submit", card)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("4 job(s) submitted", out)
+        with open(card, "a") as f:
+            f.write("seed = 7\n")
+        rc, out = self.run_cli("submit", card)
+        self.assertEqual(rc, 1)
+        self.assertIn("different card", out)
 
     def test_status_by_name_with_own_output_root(self):
         elsewhere = os.path.join(self.tmp, "elsewhere")

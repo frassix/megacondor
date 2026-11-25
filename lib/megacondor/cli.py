@@ -7,6 +7,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 
 from . import build
 from .card import PARTICLES, REPO, Card, CardError, Site, _angles
@@ -48,6 +49,8 @@ def main(argv=None):
 
     s = sub.add_parser("status", help="show job status of a run")
     s.add_argument("run")
+    s.add_argument("--all", action="store_true",
+                   help="list every job that is not done, not only the running ones")
 
     s = sub.add_parser("resubmit", help="resubmit jobs that did not finish")
     s.add_argument("run")
@@ -125,9 +128,17 @@ def cmd_prepare(args, site):
 def cmd_submit(args, site):
     if os.path.isfile(args.target) and args.target.endswith(".ini"):
         card = Card(args.target, site)
-        rundir, summary = build.prepare(card, site)
-        remember_run(card.name, rundir)
-        print(summary + "\n")
+        rundir = os.path.abspath(os.path.join(card.output_root, card.name))
+        if os.path.isfile(os.path.join(rundir, "jobs.list")):
+            # already prepared: submit it, if it was prepared from this same card
+            with open(card.path) as a, open(os.path.join(rundir, "card.ini")) as b:
+                if a.read() != b.read():
+                    raise CardError("run '%s' already exists (%s) and was prepared from a different "
+                                    "card. Change 'name' in the card for a new run." % (card.name, rundir))
+        else:
+            rundir, summary = build.prepare(card, site)
+            remember_run(card.name, rundir)
+            print(summary + "\n")
     else:
         rundir = resolve_run(args.target, site)
     marker = os.path.join(rundir, "submitted")
@@ -180,6 +191,101 @@ def cmd_status(args, site):
         print("  (condor_q not available: 'running' means the job started, it may have been removed since)")
     print("  condor log: %s" % condor_log_of(rundir))
 
+    shown = [j for j in jobs if (st["state"][j[0]] != "done" if args.all else st["state"][j[0]] == "running")]
+    if shown:
+        print("\n  %s jobs:" % ("not finished" if args.all else "running"))
+        print_job_table(shown, st, show_state=args.all)
+
+
+def print_job_table(jobs, st, show_state=False):
+    now = time.time()
+    rows = [["job"] + (["state"] if show_state else []) +
+            ["condor id", "host", "particle", "energy", "spectrum", "progress", "runtime", "left"]]
+    for job, source, _seed in jobs:
+        q = st["queue"].get(source, {})
+        state = st["state"][job]
+        particle, energy, spectrum = describe_job(source)
+        total = _triggers_in(source)
+        n = _progress(source, total) if state == "running" else 0
+        runtime = now - q["start"] if q.get("start") and state == "running" else None
+        left = runtime * (total - n) / n if runtime and n else None
+        frac = float(n) / total if total else 0
+        rows.append([job] + ([state] if show_state else []) +
+                    [q.get("id", "-"), q.get("host", "-"), particle, energy, spectrum,
+                     "[%-10s] %3d%%" % ("#" * int(10 * frac), 100 * frac) if state == "running" else "-",
+                     _duration(runtime), _duration(left)])
+    widths = [max(len(r[i]) for r in rows) for i in range(len(rows[0]))]
+    for r in rows:
+        print("     " + "  ".join(c.ljust(w) for c, w in zip(r, widths)).rstrip())
+
+
+def describe_job(source):
+    """(particle(s), energy range, spectrum) of a job, read from its .source file."""
+    names, spectra, beams = [], {}, {}
+    with open(source) as f:
+        for line in f:
+            tok = line.split()
+            if len(tok) < 2 or "." not in tok[0]:
+                continue
+            owner, key = tok[0].split(".", 1)
+            if key == "Source":
+                names.append(tok[1])
+            elif key == "Spectrum":
+                spectra[owner] = tok[1:]
+            elif key == "Beam":
+                beams[owner] = tok[1:]
+    if not names:
+        return "?", "?", "?"
+    spec, beam = spectra.get(names[0], []), beams.get(names[0], [])
+    kind = spec[0].lower() if spec else "?"
+    try:
+        if kind == "linear":
+            erange, label = (float(spec[1]), float(spec[2])), "flat"
+        elif kind == "powerlaw":
+            erange, label = (float(spec[1]), float(spec[2])), "logflat" if spec[3] == "1" else "powerlaw"
+        elif kind == "file":
+            erange, label = _range_of(spec[1], "DP"), "flux"
+        elif kind == "normalizedenergybeamfluxfunction":
+            erange, label = _range_of(beam[1], "EA"), "flux"
+        else:
+            erange, label = None, kind
+    except (IndexError, ValueError, OSError):
+        erange, label = None, kind
+    return "+".join(n.lower() for n in names), _energy_range(erange), label
+
+
+def _range_of(path, key):
+    """First and last energy of a spectrum (DP lines) or flux table (EA line)."""
+    values = []
+    with open(path) as f:
+        for line in f:
+            tok = line.split()
+            if tok and tok[0] == key:
+                if key == "EA":
+                    return float(tok[1]), float(tok[-1])
+                values.append(float(tok[1]))
+    return values[0], values[-1]
+
+
+def _energy(x):
+    for unit, scale in (("GeV", 1e6), ("MeV", 1e3), ("keV", 1.0)):
+        if x >= scale or unit == "keV":
+            return "%.3g" % (x / scale), unit
+
+
+def _energy_range(erange):
+    if not erange:
+        return "?"
+    (a, ua), (b, ub) = _energy(erange[0]), _energy(erange[1])
+    return "%s-%s %s" % (a, b, ub) if ua == ub else "%s %s - %s %s" % (a, ua, b, ub)
+
+
+def _duration(seconds):
+    if seconds is None:
+        return "-"
+    m = int(seconds) // 60
+    return "%dh%02dm" % (m // 60, m % 60) if m >= 60 else "%dm" % m
+
 
 def _bar(n, total, width=30):
     frac = float(n) / total if total else 0.0
@@ -202,12 +308,13 @@ def job_states(rundir, jobs):
             with open(mark + ".failed") as f:
                 failed.append((job, (f.readline().strip() or "unknown error")))
         elif queue is not None:
-            s = queue.get(source, "stopped")
+            s = queue[source]["state"] if source in queue else "stopped"
         else:
             s = "running" if os.path.exists(mark + ".progress") else "waiting"
         state[job] = s
         counts[s] = counts.get(s, 0) + 1
-    return {"state": state, "failed": failed, "counts": counts, "queue_known": queue is not None}
+    return {"state": state, "failed": failed, "counts": counts, "queue_known": queue is not None,
+            "queue": queue or {}}
 
 
 def cmd_resubmit(args, site):
@@ -277,7 +384,11 @@ def resolve_run(target, site):
             path = known_runs().get(target, path)
     path = os.path.abspath(path)
     if not os.path.isfile(os.path.join(path, "jobs.list")):
-        raise CardError("no prepared run found at %s" % path)
+        names = sorted(known_runs())
+        raise CardError("no prepared run called '%s'.\n"
+                        "A run is named by the 'name' line inside the card, not by the card's file name.\n"
+                        "You can also give the card itself (sims/<file>.ini) or the run directory.%s"
+                        % (target, ("\nRuns prepared here: " + ", ".join(names)) if names else ""))
     return path
 
 
@@ -338,14 +449,15 @@ CONDOR_STATES = {"1": "idle", "2": "running", "3": "stopped", "4": "running", "5
 
 
 def condor_jobs(batch_name):
-    """{source file: state} for this run's jobs in the condor queue,
-    or None if condor_q is not available."""
+    """{source file: {state, id, start, host}} for this run's jobs in the
+    condor queue, or None if condor_q is not available."""
     if not shutil.which("condor_q"):
         return None
     try:
         out = subprocess.check_output(
             ["condor_q", "-constraint", 'JobBatchName == "%s"' % batch_name,
-             "-af", "JobStatus", "Args", "Arguments"],
+             "-af", "JobStatus", "ClusterId", "ProcId", "JobCurrentStartDate", "RemoteHost",
+             "Args", "Arguments"],
             universal_newlines=True, stderr=subprocess.DEVNULL)
     except (subprocess.CalledProcessError, OSError):
         return None
@@ -353,8 +465,12 @@ def condor_jobs(batch_name):
     for line in out.splitlines():
         tok = line.split()
         sources = [t for t in tok[1:] if t.endswith(".source")]
-        if tok and sources:
-            jobs[sources[0]] = CONDOR_STATES.get(tok[0], "in queue")
+        if len(tok) < 5 or not sources:
+            continue
+        start = int(tok[3]) if tok[3].isdigit() else None
+        host = tok[4].split("@")[-1].split(".")[0] if tok[4] != "undefined" else "-"
+        jobs[sources[0]] = {"state": CONDOR_STATES.get(tok[0], "in queue"),
+                            "id": "%s.%s" % (tok[1], tok[2]), "start": start, "host": host}
     return jobs
 
 
